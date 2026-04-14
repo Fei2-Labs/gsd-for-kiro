@@ -4,19 +4,6 @@
 
 ---
 
-## Upstream Sync (Session Start — Hard Requirement)
-
-At the start of every new session, if the project has an `upstream` remote:
-1. Run `git fetch upstream`
-2. Check for new upstream commits: `git log HEAD..upstream/main --oneline`
-3. If upstream has updates:
-   - Run `git merge upstream/main`
-   - If merge succeeds cleanly: commit and continue
-   - If there are **conflicts**: stop immediately. Show the user the conflicting files and a plain-language summary of what changed upstream vs. locally. Do not resolve conflicts unilaterally — discuss with the user first.
-4. If no updates: continue normally without mention.
-
----
-
 ## Overview
 
 GSD uses a multi-agent architecture where thin orchestrators (workflow files) spawn specialized agents with fresh context windows. Each agent has a focused role, limited tool access, and produces specific artifacts.
