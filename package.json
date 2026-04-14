@@ -1,5 +1,5 @@
 {
-  "name": "@fei2-labs/get-shit-done",
+  "name": "@clarezoe/get-shit-done",
   "version": "1.35.1",
   "description": "A meta-prompting, context engineering and spec-driven development system for Claude Code, OpenCode, Gemini, Kiro, Codex and more. Fork of get-shit-done-cc with Kiro IDE/CLI support.",
   "bin": {
