@@ -1,7 +1,7 @@
 {
-  "name": "get-shit-done-cc",
-  "version": "1.35.0",
-  "description": "A meta-prompting, context engineering and spec-driven development system for Claude Code, OpenCode, Gemini and Codex by TÂCHES.",
+  "name": "@fei2-labs/get-shit-done",
+  "version": "1.35.1",
+  "description": "A meta-prompting, context engineering and spec-driven development system for Claude Code, OpenCode, Gemini, Kiro, Codex and more. Fork of get-shit-done-cc with Kiro IDE/CLI support.",
   "bin": {
     "get-shit-done-cc": "bin/install.js"
   },
@@ -23,17 +23,21 @@
     "gemini",
     "gemini-cli",
     "codex",
-    "codex-cli"
+    "codex-cli",
+    "kiro",
+    "kiro-ide",
+    "kiro-cli"
   ],
   "author": "TÂCHES",
+  "contributors": ["Fei2-Labs"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gsd-build/get-shit-done.git"
+    "url": "git+https://github.com/Fei2-Labs/gsd.git"
   },
-  "homepage": "https://github.com/gsd-build/get-shit-done",
+  "homepage": "https://github.com/Fei2-Labs/gsd",
   "bugs": {
-    "url": "https://github.com/gsd-build/get-shit-done/issues"
+    "url": "https://github.com/Fei2-Labs/gsd/issues"
   },
   "engines": {
     "node": ">=22.0.0"

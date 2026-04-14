@@ -17,6 +17,22 @@
 [![GitHub stars](https://img.shields.io/github/stars/gsd-build/get-shit-done?style=for-the-badge&logo=github&color=181717)](https://github.com/gsd-build/get-shit-done)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
+---
+
+> **Fei2-Labs fork** — This is [`@fei2-labs/get-shit-done`](https://www.npmjs.com/package/@fei2-labs/get-shit-done), a community fork of the upstream [`get-shit-done-cc`](https://www.npmjs.com/package/get-shit-done-cc) with added **Kiro IDE/CLI runtime support** (`--kiro`). All original features are preserved. For the official package, see [gsd-build/get-shit-done](https://github.com/gsd-build/get-shit-done).
+>
+> **Install this fork:**
+> ```bash
+> # Install for Kiro (this fork)
+> npx @fei2-labs/get-shit-done --kiro --global
+>
+> # All other runtimes work identically to upstream
+> npx @fei2-labs/get-shit-done --claude --global
+> npx @fei2-labs/get-shit-done --all --global
+> ```
+
+---
+
 <br>
 
 ```bash
