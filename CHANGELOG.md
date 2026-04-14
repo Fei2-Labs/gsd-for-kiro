@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Kiro IDE/CLI runtime support** — First-class Kiro runtime via `--kiro` flag. Installs GSD skills to `.kiro/skills/gsd-*/SKILL.md` and agents to `.kiro/agents/`. Supports local (`./.kiro/`) and global (`~/.kiro/`) installs. Converts Claude tool names to Kiro-native equivalents (`Bash`→`shell`, `Edit`→`write`, `Read`→`read`). `KIRO_CONFIG_DIR` env var for custom global path. `KIRO_SESSION_ID` for workstream detection. Kiro included in `--all` flag and interactive prompt (option 11). (#2184)
+
 - **`@gsd-build/sdk` — Phase 1 typed query foundation** — Registry-based `gsd-sdk query` command, classified errors (`GSDQueryError`), and unit-tested handlers under `sdk/src/query/` (state, roadmap, phase lifecycle, init, config, validation, and related domains). Implements incremental SDK-first migration scope approved in #2083; builds on validated work from #2007 / `feat/sdk-foundation` without migrating workflows or removing `gsd-tools.cjs` in this phase.
 - **Flow diagram directive for phase researcher** — `gsd-phase-researcher` now enforces data-flow architecture diagrams instead of file-listing diagrams. Language-agnostic directive added to agent prompt and research template. (#2139)
 
