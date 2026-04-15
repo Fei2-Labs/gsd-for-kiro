@@ -8,18 +8,18 @@
 
 **Solves context rot — the quality degradation that happens as Claude fills its context window.**
 
-[![npm version](https://img.shields.io/npm/v/get-shit-done-cc?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/get-shit-done-cc)
-[![npm downloads](https://img.shields.io/npm/dm/get-shit-done-cc?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/get-shit-done-cc)
+[![npm version](https://img.shields.io/npm/v/@fei2-labs/get-shit-done?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@fei2-labs/get-shit-done)
+[![npm downloads](https://img.shields.io/npm/dm/@fei2-labs/get-shit-done?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@fei2-labs/get-shit-done)
 [![Tests](https://img.shields.io/github/actions/workflow/status/gsd-build/get-shit-done/test.yml?branch=main&style=for-the-badge&logo=github&label=Tests)](https://github.com/gsd-build/get-shit-done/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/mYgfVNfA2r)
 [![X (Twitter)](https://img.shields.io/badge/X-@gsd__foundation-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/gsd_foundation)
 [![$GSD Token](https://img.shields.io/badge/$GSD-Dexscreener-1C1C1C?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0iIzAwRkYwMCIvPjwvc3ZnPg==&logoColor=00FF00)](https://dexscreener.com/solana/dwudwjvan7bzkw9zwlbyv6kspdlvhwzrqy6ebk8xzxkv)
-[![GitHub stars](https://img.shields.io/github/stars/gsd-build/get-shit-done?style=for-the-badge&logo=github&color=181717)](https://github.com/gsd-build/get-shit-done)
+[![GitHub stars](https://img.shields.io/github/stars/Fei2-Labs/gsd?style=for-the-badge&logo=github&color=181717)](https://github.com/Fei2-Labs/gsd)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ---
 
-> **Fei2-Labs fork** - This is [`@fei2-labs/get-shit-done`](https://www.npmjs.com/package/@fei2-labs/get-shit-done), a community fork of the upstream [`get-shit-done-cc`](https://www.npmjs.com/package/get-shit-done-cc) with added **Kiro IDE/CLI runtime support** (`--kiro`). All original features are preserved. For the official package, see [gsd-build/get-shit-done](https://github.com/gsd-build/get-shit-done).
+> **Fei2-Labs fork** — This is [`@fei2-labs/get-shit-done`](https://www.npmjs.com/package/@fei2-labs/get-shit-done), a community fork of the upstream [`get-shit-done-cc`](https://www.npmjs.com/package/get-shit-done-cc) with **first-class Kiro IDE/CLI support** (`--kiro`). All original features are preserved. For the official package, see [gsd-build/get-shit-done](https://github.com/gsd-build/get-shit-done).
 >
 > **Install this fork:**
 > ```bash
@@ -30,13 +30,15 @@
 > npx @fei2-labs/get-shit-done --claude --global
 > npx @fei2-labs/get-shit-done --all --global
 > ```
+>
+> ⭐ **If you use Kiro, please [star this repo](https://github.com/Fei2-Labs/gsd)** — it helps other Kiro users find GSD!
 
 ---
 
 <br>
 
 ```bash
-npx get-shit-done-cc@latest
+npx @fei2-labs/get-shit-done@latest
 ```
 
 **Works on Mac, Windows, and Linux.**
@@ -105,21 +107,20 @@ People who want to describe what they want and have it built correctly — witho
 
 Built-in quality gates catch real problems: schema drift detection flags ORM changes missing migrations, security enforcement anchors verification to threat models, and scope reduction detection prevents the planner from silently dropping your requirements.
 
-### v1.36.0 Highlights
+### v1.36.1 Highlights (This Fork)
 
-- **Knowledge graph integration** — `/gsd-graphify` brings knowledge graphs to planning agents for richer context connections
-- **SDK typed query foundation** — Registry-based `gsd-sdk query` command with classified errors and handlers for state, roadmap, phase lifecycle, and config
-- **TDD pipeline mode** — Opt-in test-driven development workflow with `--tdd` flag
-- **Context-window-aware prompt thinning** — Automatic prompt size reduction for sub-200K models
-- **Project skills awareness** — 9 GSD agents now discover and use project-scoped skills
-- **30+ bug fixes** — Worktree safety, state management, installer paths, and health check optimizations
+- **Kiro orchestrator agent** — `/agent swap gsd` or `ctrl+g` to switch to a GSD-specialized agent in Kiro CLI with all 74 skills loaded
+- **Kiro skill auto-activation** — Enhanced trigger phrases in skill descriptions for reliable auto-matching in Kiro CLI
+- **First-class Kiro support** — `--kiro` flag, `.kiro/skills/` + `.kiro/agents/` directories, Kiro-native tool mappings
+- **Upstream v1.36.0 merged** — Knowledge graphs, SDK foundation, TDD pipeline, context-aware prompt thinning
+- **30+ upstream bug fixes** — Worktree safety, state management, installer paths, health check optimizations
 
 ---
 
 ## Getting Started
 
 ```bash
-npx get-shit-done-cc@latest
+npx @fei2-labs/get-shit-done@latest
 ```
 
 The installer prompts you to choose:
@@ -128,7 +129,9 @@ The installer prompts you to choose:
 
 Verify with:
 - Claude Code / Gemini / Copilot / Antigravity / Qwen Code: `/gsd-help`
-- OpenCode / Kilo / Kiro / Augment / Trae / CodeBuddy: `/gsd-help`
+- OpenCode / Kilo / Augment / Trae / CodeBuddy: `/gsd-help`
+- **Kiro IDE:** Type `/` in chat to see GSD skills as slash commands
+- **Kiro CLI:** `/agent swap gsd` or `ctrl+g` to switch to the GSD orchestrator agent
 - Codex: `$gsd-help`
 - Cline: GSD installs via `.clinerules` — verify by checking `.clinerules` exists
 
@@ -140,12 +143,28 @@ The canonical discovery contract is documented in [docs/skills/discovery-contrac
 > [!TIP]
 > For source-based installs or environments where npm is unavailable, see **[docs/manual-update.md](docs/manual-update.md)**.
 
+### Using with Kiro
+
+Kiro works differently from Claude Code — there are no `/gsd-*` slash commands in Kiro CLI. Instead:
+
+**Kiro IDE** — Skills appear as slash commands when you type `/` in the chat input. Select a GSD skill to load its instructions.
+
+**Kiro CLI** — Skills auto-activate based on your request description. For explicit control, use the GSD orchestrator agent:
+
+```
+/agent swap gsd          # Switch to GSD agent in an active session
+kiro-cli --agent gsd     # Start Kiro CLI with GSD agent from the beginning
+ctrl+g                    # Quick keyboard shortcut to swap agents
+```
+
+The GSD orchestrator agent loads all 74 skills as resources and matches your request to the right workflow automatically.
+
 ### Staying Updated
 
 GSD evolves fast. Update periodically:
 
 ```bash
-npx get-shit-done-cc@latest
+npx @fei2-labs/get-shit-done@latest
 ```
 
 <details>
@@ -153,65 +172,65 @@ npx get-shit-done-cc@latest
 
 ```bash
 # Claude Code
-npx get-shit-done-cc --claude --global   # Install to ~/.claude/
-npx get-shit-done-cc --claude --local    # Install to ./.claude/
+npx @fei2-labs/get-shit-done --claude --global   # Install to ~/.claude/
+npx @fei2-labs/get-shit-done --claude --local    # Install to ./.claude/
 
 # OpenCode
-npx get-shit-done-cc --opencode --global # Install to ~/.config/opencode/
+npx @fei2-labs/get-shit-done --opencode --global # Install to ~/.config/opencode/
 
 # Gemini CLI
-npx get-shit-done-cc --gemini --global   # Install to ~/.gemini/
+npx @fei2-labs/get-shit-done --gemini --global   # Install to ~/.gemini/
 
 # Kilo
-npx get-shit-done-cc --kilo --global     # Install to ~/.config/kilo/
-npx get-shit-done-cc --kilo --local      # Install to ./.kilo/
+npx @fei2-labs/get-shit-done --kilo --global     # Install to ~/.config/kilo/
+npx @fei2-labs/get-shit-done --kilo --local      # Install to ./.kilo/
 
 # Kiro
-npx get-shit-done-cc --kiro --global     # Install to ~/.kiro/
-npx get-shit-done-cc --kiro --local      # Install to ./.kiro/
+npx @fei2-labs/get-shit-done --kiro --global     # Install to ~/.kiro/ (includes orchestrator agent)
+npx @fei2-labs/get-shit-done --kiro --local      # Install to ./.kiro/
 
 # Codex
-npx get-shit-done-cc --codex --global    # Install to ~/.codex/
-npx get-shit-done-cc --codex --local     # Install to ./.codex/
+npx @fei2-labs/get-shit-done --codex --global    # Install to ~/.codex/
+npx @fei2-labs/get-shit-done --codex --local     # Install to ./.codex/
 
 # Copilot
-npx get-shit-done-cc --copilot --global  # Install to ~/.github/
-npx get-shit-done-cc --copilot --local   # Install to ./.github/
+npx @fei2-labs/get-shit-done --copilot --global  # Install to ~/.github/
+npx @fei2-labs/get-shit-done --copilot --local   # Install to ./.github/
 
 # Cursor CLI
-npx get-shit-done-cc --cursor --global      # Install to ~/.cursor/
-npx get-shit-done-cc --cursor --local       # Install to ./.cursor/
+npx @fei2-labs/get-shit-done --cursor --global      # Install to ~/.cursor/
+npx @fei2-labs/get-shit-done --cursor --local       # Install to ./.cursor/
 
 # Windsurf
-npx get-shit-done-cc --windsurf --global    # Install to ~/.codeium/windsurf/
-npx get-shit-done-cc --windsurf --local     # Install to ./.windsurf/
+npx @fei2-labs/get-shit-done --windsurf --global    # Install to ~/.codeium/windsurf/
+npx @fei2-labs/get-shit-done --windsurf --local     # Install to ./.windsurf/
 
 # Antigravity
-npx get-shit-done-cc --antigravity --global # Install to ~/.gemini/antigravity/
-npx get-shit-done-cc --antigravity --local  # Install to ./.agent/
+npx @fei2-labs/get-shit-done --antigravity --global # Install to ~/.gemini/antigravity/
+npx @fei2-labs/get-shit-done --antigravity --local  # Install to ./.agent/
 
 # Augment
-npx get-shit-done-cc --augment --global     # Install to ~/.augment/
-npx get-shit-done-cc --augment --local      # Install to ./.augment/
+npx @fei2-labs/get-shit-done --augment --global     # Install to ~/.augment/
+npx @fei2-labs/get-shit-done --augment --local      # Install to ./.augment/
 
 # Trae
-npx get-shit-done-cc --trae --global        # Install to ~/.trae/
-npx get-shit-done-cc --trae --local         # Install to ./.trae/
+npx @fei2-labs/get-shit-done --trae --global        # Install to ~/.trae/
+npx @fei2-labs/get-shit-done --trae --local         # Install to ./.trae/
 
 # Qwen Code
-npx get-shit-done-cc --qwen --global        # Install to ~/.qwen/
-npx get-shit-done-cc --qwen --local         # Install to ./.qwen/
+npx @fei2-labs/get-shit-done --qwen --global        # Install to ~/.qwen/
+npx @fei2-labs/get-shit-done --qwen --local         # Install to ./.qwen/
 
 # CodeBuddy
-npx get-shit-done-cc --codebuddy --global   # Install to ~/.codebuddy/
-npx get-shit-done-cc --codebuddy --local    # Install to ./.codebuddy/
+npx @fei2-labs/get-shit-done --codebuddy --global   # Install to ~/.codebuddy/
+npx @fei2-labs/get-shit-done --codebuddy --local    # Install to ./.codebuddy/
 
 # Cline
-npx get-shit-done-cc --cline --global       # Install to ~/.cline/
-npx get-shit-done-cc --cline --local        # Install to ./.clinerules
+npx @fei2-labs/get-shit-done --cline --global       # Install to ~/.cline/
+npx @fei2-labs/get-shit-done --cline --local        # Install to ./.clinerules
 
 # All runtimes
-npx get-shit-done-cc --all --global      # Install to all directories
+npx @fei2-labs/get-shit-done --all --global      # Install to all directories
 ```
 
 Use `--global` (`-g`) or `--local` (`-l`) to skip the location prompt.
@@ -226,10 +245,10 @@ Use `--sdk` to also install the GSD SDK CLI (`gsd-sdk`) for headless autonomous 
 Clone the repository, build hooks, and run the installer locally:
 
 ```bash
-git clone https://github.com/gsd-build/get-shit-done.git
-cd get-shit-done
+git clone https://github.com/Fei2-Labs/gsd.git
+cd gsd
 npm run build:hooks
-node bin/install.js --claude --local
+node bin/install.js --kiro --local
 ```
 
 The `build:hooks` step is required — it compiles hook sources into `hooks/dist/` which the installer copies from. Without it, hooks won't be installed and you'll get hook errors in Claude Code. (The npm release handles this automatically via `prepublishOnly`.)
@@ -920,13 +939,15 @@ These community ports pioneered multi-runtime support:
 
 ## Star History
 
-<a href="https://star-history.com/#gsd-build/get-shit-done&Date">
+<a href="https://star-history.com/#Fei2-Labs/gsd&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=gsd-build/get-shit-done&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=gsd-build/get-shit-done&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=gsd-build/get-shit-done&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Fei2-Labs/gsd&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Fei2-Labs/gsd&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Fei2-Labs/gsd&type=Date" />
  </picture>
 </a>
+
+⭐ **Enjoying GSD for Kiro? [Star this repo](https://github.com/Fei2-Labs/gsd)** to help other Kiro users discover it!
 
 ---
 
@@ -938,6 +959,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**Claude Code is powerful. GSD makes it reliable.**
+**Kiro is powerful. GSD makes it reliable.** ⭐ [Star us](https://github.com/Fei2-Labs/gsd)
 
 </div>
