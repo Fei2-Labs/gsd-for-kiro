@@ -1787,6 +1787,77 @@ When the workflow needs to spawn a subagent:
 </kiro_skill_adapter>`;
 }
 
+// Kiro CLI auto-activates skills by matching user requests against descriptions.
+// Add trigger phrases so common user phrases match GSD skills reliably.
+const KIRO_TRIGGER_PHRASES = {
+  'gsd-new-project': 'Initialize a new project. Use when: starting a new project, creating a new app, setting up GSD for the first time.',
+  'gsd-discuss-phase': 'Gather phase context through adaptive questioning. Use when: discussing a phase, exploring requirements, figuring out what to build.',
+  'gsd-plan-phase': 'Create a detailed phase plan. Use when: planning a phase, creating a plan, breaking down work into steps.',
+  'gsd-execute-phase': 'Execute all plans in a phase. Use when: executing a phase, running a plan, implementing the work.',
+  'gsd-verify-work': 'Validate built features through UAT. Use when: verifying work, testing features, running UAT, checking if it works.',
+  'gsd-ship': 'Create PR, run review, and prepare for merge. Use when: shipping, creating a PR, submitting for review, merging.',
+  'gsd-next': 'Automatically advance to the next logical step. Use when: what next, continue, next step, proceed.',
+  'gsd-progress': 'Check project progress and route to next action. Use when: checking progress, status, how far along, current state.',
+  'gsd-update': 'Check for GSD updates and install. Use when: updating GSD, checking for updates, upgrade.',
+  'gsd-help': 'Show available GSD commands and usage guide. Use when: help, what commands, available commands, how to use GSD.',
+  'gsd-new-milestone': 'Start a new milestone cycle. Use when: new milestone, starting a milestone, next version.',
+  'gsd-complete-milestone': 'Archive completed milestone and prepare for next. Use when: completing milestone, finishing milestone, archiving.',
+  'gsd-quick': 'Execute a quick task with GSD guarantees. Use when: quick task, small fix, trivial change, fast.',
+  'gsd-debug': 'Systematic debugging with persistent state. Use when: debugging, fixing a bug, investigating an issue.',
+  'gsd-scan': 'Rapid codebase assessment. Use when: scanning codebase, quick overview, assessing the code.',
+  'gsd-undo': 'Safe git revert. Use when: undo, revert, roll back, go back.',
+  'gsd-code-review': 'Review code changes for quality. Use when: code review, reviewing changes, checking code quality.',
+  'gsd-audit-fix': 'Autonomous audit-to-fix pipeline. Use when: auditing, fixing issues, auto-fix.',
+  'gsd-resume-work': 'Resume work from previous session. Use when: resuming, continuing from where I left off.',
+  'gsd-pause-work': 'Create context handoff when pausing. Use when: pausing, taking a break, saving context.',
+  'gsd-health': 'Diagnose planning directory health. Use when: health check, diagnose issues, repair.',
+  'gsd-note': 'Capture an idea or task. Use when: note, idea, capture, remember this.',
+  'gsd-stats': 'Display project statistics. Use when: stats, statistics, metrics, how many phases.',
+  'gsd-add-backlog': 'Add an idea to the backlog. Use when: backlog, add idea, parking lot.',
+  'gsd-add-phase': 'Add phase to current milestone. Use when: add phase, new phase, insert work.',
+  'gsd-add-todo': 'Capture a todo from conversation. Use when: todo, task, add task.',
+  'gsd-check-todos': 'List pending todos. Use when: check todos, pending tasks, what to do.',
+  'gsd-workstreams': 'Manage parallel workstreams. Use when: workstreams, parallel work, switch context.',
+  'gsd-thread': 'Manage persistent context threads. Use when: thread, context thread, cross-session.',
+  'gsd-session-report': 'Generate session report. Use when: session report, summary, what was done.',
+  'gsd-graphify': 'Build and query the project knowledge graph. Use when: knowledge graph, graph, connections.',
+  'gsd-map-codebase': 'Analyze codebase with parallel mappers. Use when: map codebase, analyze structure, understand codebase.',
+  'gsd-profile-user': 'Generate developer behavioral profile. Use when: profile, user preferences, adapt to me.',
+  'gsd-settings': 'Configure GSD workflow toggles. Use when: settings, configure, preferences.',
+  'gsd-import': 'Ingest external plans with conflict detection. Use when: import plan, bring in external plan.',
+  'gsd-from-gsd2': 'Import GSD-2 project back to v1. Use when: migrate from gsd2, convert gsd2.',
+  'gsd-review-backlog': 'Review and promote backlog items. Use when: review backlog, promote items.',
+  'gsd-inbox': 'Triage GitHub issues and PRs. Use when: inbox, triage, review issues, PRs.',
+  'gsd-insert-phase': 'Insert urgent work between phases. Use when: insert phase, urgent work, priority.',
+  'gsd-remove-phase': 'Remove a future phase. Use when: remove phase, delete phase.',
+  'gsd-list-workspaces': 'List active GSD workspaces. Use when: list workspaces, active workspaces.',
+  'gsd-new-workspace': 'Create an isolated workspace. Use when: new workspace, isolated workspace.',
+  'gsd-remove-workspace': 'Remove a GSD workspace. Use when: remove workspace, clean up workspace.',
+  'gsd-pr-branch': 'Create a clean PR branch. Use when: PR branch, clean branch, review branch.',
+  'gsd-reapply-patches': 'Reapply local modifications after update. Use when: reapply patches, local changes after update.',
+  'gsd-forensics': 'Post-mortem investigation for failed workflows. Use when: forensics, what went wrong, diagnose failure.',
+  'gsd-secure-phase': 'Verify threat mitigations for a phase. Use when: security, threat check, secure.',
+  'gsd-validate-phase': 'Audit and fill validation gaps. Use when: validate, validation gaps, audit.',
+  'gsd-ui-phase': 'Generate UI design contract. Use when: UI design, design contract, UI spec.',
+  'gsd-ui-review': 'Visual audit of frontend code. Use when: UI review, visual audit, design review.',
+  'gsd-ai-integration-phase': 'Generate AI design contract. Use when: AI integration, AI spec, AI design.',
+  'gsd-plan-milestone-gaps': 'Create phases to close milestone gaps. Use when: milestone gaps, missing phases.',
+  'gsd-milestone-summary': 'Generate project summary from milestone. Use when: milestone summary, project overview.',
+  'gsd-extract-learnings': 'Extract learnings from completed phase. Use when: extract learnings, lessons learned, patterns.',
+  'gsd-plant-seed': 'Capture a forward-looking idea. Use when: plant seed, future idea, reminder.',
+  'gsd-add-tests': 'Generate tests for a completed phase. Use when: add tests, generate tests, test coverage.',
+  'gsd-audit-milestone': 'Audit milestone completion. Use when: audit milestone, check completion.',
+  'gsd-audit-uat': 'Cross-phase audit of UAT items. Use when: audit UAT, outstanding UAT, verification items.',
+  'gsd-cleanup': 'Archive completed phase directories. Use when: cleanup, archive, tidy up.',
+  'gsd-intel': 'Query codebase intelligence files. Use when: intel, intelligence, codebase insights.',
+  'gsd-list-phase-assumptions': 'Surface assumptions about a phase. Use when: assumptions, what are we assuming.',
+  'gsd-join-discord': 'Join the GSD Discord community. Use when: discord, community, chat.',
+  'gsd-docs-update': 'Generate or update project documentation. Use when: update docs, generate docs, documentation.',
+  'gsd-eval-review': 'Audit evaluation coverage. Use when: eval review, evaluation coverage.',
+  'gsd-set-profile': 'Switch model profile. Use when: set profile, switch model, quality balanced budget.',
+  'gsd-autonomous': 'Run all remaining phases autonomously. Use when: autonomous, run all, auto-execute.',
+};
+
 function convertClaudeCommandToKiroSkill(content, skillName) {
   const converted = convertClaudeToKiroMarkdown(content);
   const { frontmatter, body } = extractFrontmatterAndBody(converted);
@@ -1797,8 +1868,14 @@ function convertClaudeCommandToKiroSkill(content, skillName) {
       description = maybeDescription;
     }
   }
+  // Kiro CLI auto-activates skills by matching user requests against descriptions.
+  // Prepend trigger phrases so common user phrases match GSD skills reliably.
+  const triggerPhrase = KIRO_TRIGGER_PHRASES[skillName];
+  if (triggerPhrase) {
+    description = triggerPhrase;
+  }
   description = toSingleLine(description);
-  const shortDescription = description.length > 180 ? `${description.slice(0, 177)}...` : description;
+  const shortDescription = description.length > 200 ? `${description.slice(0, 197)}...` : description;
   const adapter = getKiroSkillAdapterHeader(skillName);
 
   return `---\nname: ${yamlIdentifier(skillName)}\ndescription: ${yamlQuote(shortDescription)}\n---\n\n${adapter}\n\n${body.trimStart()}`;
@@ -4975,13 +5052,13 @@ function uninstall(isGlobal, runtime = 'claude') {
     }
   }
 
-  // 3. Remove GSD agents (gsd-*.md files only)
+  // 3. Remove GSD agents (gsd-*.md and gsd.json files only)
   const agentsDir = path.join(targetDir, 'agents');
   if (fs.existsSync(agentsDir)) {
     const files = fs.readdirSync(agentsDir);
     let agentCount = 0;
     for (const file of files) {
-      if (file.startsWith('gsd-') && file.endsWith('.md')) {
+      if ((file.startsWith('gsd-') && file.endsWith('.md')) || file === 'gsd.json') {
         fs.unlinkSync(path.join(agentsDir, file));
         agentCount++;
       }
@@ -6016,6 +6093,20 @@ function install(isGlobal, runtime = 'claude') {
       console.log(`  ${green}✓${reset} Installed agents`);
     } else {
       failures.push('agents');
+    }
+
+    // Kiro CLI: install orchestrator agent (gsd.json) for /agent swap gsd
+    if (isKiro) {
+      const orchestratorSrc = path.join(agentsSrc, 'gsd.json');
+      if (fs.existsSync(orchestratorSrc)) {
+        let orchestratorContent = fs.readFileSync(orchestratorSrc, 'utf8');
+        // Replace path references for local vs global install
+        if (!isGlobal) {
+          orchestratorContent = orchestratorContent.replace(/~\/\.kiro\//g, './.kiro/');
+        }
+        fs.writeFileSync(path.join(agentsDest, 'gsd.json'), orchestratorContent);
+        console.log(`  ${green}✓${reset} Installed GSD orchestrator agent (/agent swap gsd)`);
+      }
     }
   }
 

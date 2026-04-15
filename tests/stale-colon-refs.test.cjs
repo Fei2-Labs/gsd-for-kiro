@@ -67,6 +67,7 @@ function isTestInput(filePath, line) {
     'tests/codex-config.test.cjs',
     'tests/trae-install.test.cjs',
     'tests/codebuddy-install.test.cjs',
+    'tests/kiro-install.test.cjs',
   ];
 
   if (conversionTestFiles.includes(rel)) {
