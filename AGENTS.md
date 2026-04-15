@@ -116,3 +116,96 @@ npx opensrc <owner>/<repo>      # GitHub repo (e.g., npx opensrc vercel/ai)
 - Appwrite API Key: 
 - Appwrite API Endpoint: https://appwrite.dingkosonen.me/v1
 - SSH Server: 
+
+## Upstream Merge Conflict Resolution (Established 2026-04-16)
+
+When merging `upstream/main` into this fork, resolve conflicts using this strategy:
+
+| Field | Resolution |
+|-------|------------|
+| **package name** | Keep fork's: `@fei2-labs/get-shit-done` |
+| **version** | Take upstream's latest version |
+| **description** | Keep fork's with Kiro mention |
+
+**Process:**
+1. `git fetch upstream`
+2. `git merge upstream/main`
+3. Resolve conflicts in priority order:
+   - `package.json`: name (local), version (upstream), description (local)
+   - `bin/install.js`: Take upstream features + add Kiro runtime checks
+   - `CHANGELOG.md`: Combine both added sections
+   - Other files: Take upstream improvements + preserve Kiro support
+4. Build hooks: `npm run build:hooks`
+5. Commit, push, publish
+
+**Rationale:** This preserves the fork's identity (@fei2-labs scope for NPM publishing) while incorporating upstream fixes and maintaining Kiro IDE/CLI support.
+
+## Post-Merge Verification Checklist (MANDATORY)
+
+**CRITICAL:** After every upstream merge, the agent MUST verify Kiro support is intact. This is the primary purpose of this fork.
+
+### Step 1: Build Verification
+```bash
+npm run build:hooks
+```
+- [ ] Hooks build without errors
+- [ ] No compilation failures
+
+### Step 2: Test Suite
+```bash
+npm test
+```
+- [ ] All tests pass OR known failures documented
+- [ ] Kiro-specific tests pass: `tests/kiro-install.test.cjs`
+
+### Step 3: Kiro Support Verification (CRITICAL)
+Run this grep to verify Kiro integration points:
+```bash
+grep -n "isKiro\|KIRO_CONFIG\|--kiro\|convertClaude.*Kiro" bin/install.js
+```
+
+**Required Kiro features that MUST exist:**
+- [ ] `--kiro` flag in help text (line ~472)
+- [ ] `isKiro` runtime detection (multiple locations: 4687, 5666, 5853, 6004, 6275, 6592, 6611)
+- [ ] `convertClaudeCommandToKiroSkill()` function exists
+- [ ] `convertClaudeAgentToKiroAgent()` function exists
+- [ ] `copyCommandsAsKiroSkills()` function exists
+- [ ] `.kiro/skills/` directory creation in installer
+- [ ] `.kiro/agents/` directory creation in installer
+- [ ] Kiro excluded from statusline installs (line ~6594)
+- [ ] Kiro excluded from settings.json writes (line ~6611)
+
+### Step 4: Count Verification
+```bash
+grep -c "kiro\|Kiro\|KIRO" bin/install.js
+```
+- [ ] Count should be ≥ 70 (currently 72)
+
+### Step 5: Merge Conflict Scan
+```bash
+grep -r "^<<<<<<< \|^======= \|^>>>>>>> " --include="*.js" --include="*.md" --include="*.json" .
+```
+- [ ] No unresolved conflict markers remain
+
+### Step 6: Git Status
+```bash
+git status
+```
+- [ ] All conflicts resolved and staged
+- [ ] Working tree clean
+
+### If ANY Kiro check fails:
+1. STOP immediately
+2. Do NOT commit or push
+3. Report the failure to the user with specific details
+4. Fix the issue before proceeding
+
+### Commit Message Template
+```
+Merge upstream/main: resolve conflicts
+
+- Keep @fei2-labs package name
+- Bump version to vX.Y.Z
+- Preserve Kiro IDE/CLI support
+- Verified: N Kiro references intact
+```
