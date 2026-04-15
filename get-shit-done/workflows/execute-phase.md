@@ -614,11 +614,13 @@ Execute each selected wave in sequence. Within a wave: parallel if `PARALLELIZAT
          continue
        fi
 
-       # Merge the worktree branch into the current branch
-       git merge "$WT_BRANCH" --no-edit -m "chore: merge executor worktree ($WT_BRANCH)" 2>&1 || {
+       # Merge the worktree branch into the current branch (--no-ff ensures a merge commit so HEAD~1 is reliable)
+       git merge "$WT_BRANCH" --no-ff --no-edit -m "chore: merge executor worktree ($WT_BRANCH)" 2>&1 || {
          echo "⚠ Merge conflict from worktree $WT_BRANCH — resolve manually"
-         rm -f "$STATE_BACKUP" "$ROADMAP_BACKUP"
-         continue
+         echo "  STATE.md backup:   $STATE_BACKUP"
+         echo "  ROADMAP.md backup: $ROADMAP_BACKUP"
+         echo "  Restore with: cp \$STATE_BACKUP .planning/STATE.md && cp \$ROADMAP_BACKUP .planning/ROADMAP.md"
+         break
        }
 
        # Restore orchestrator-owned files (main always wins)
@@ -1333,7 +1335,7 @@ Items saved to `{phase_num}-HUMAN-UAT.md` — they will appear in `/gsd-progress
 {Gap summaries from VERIFICATION.md}
 
 ---
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 `/clear` then:
 

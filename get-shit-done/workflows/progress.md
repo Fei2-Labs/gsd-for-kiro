@@ -211,7 +211,7 @@ Read its `<objective>` section.
 ```
 ---
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **{phase}-{plan}: [Plan Name]** — [objective summary from PLAN.md]
 
@@ -240,7 +240,7 @@ PHASE_HAS_UI=$(echo "$PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true" ||
 ```
 ---
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Phase {N}: {Name}** — {Goal from ROADMAP.md}
 <sub>✓ Context gathered, ready to plan</sub>
@@ -257,7 +257,7 @@ PHASE_HAS_UI=$(echo "$PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true" ||
 ```
 ---
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Phase {N}: {Name}** — {Goal from ROADMAP.md}
 
@@ -280,7 +280,7 @@ PHASE_HAS_UI=$(echo "$PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true" ||
 ```
 ---
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Phase {N}: {Name}** — {Goal from ROADMAP.md}
 
@@ -388,7 +388,7 @@ NEXT_HAS_UI=$(echo "$NEXT_PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true
 
 ## ✓ Phase {Z} Complete
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Phase {Z+1}: {Name}** — {Goal from ROADMAP.md}
 
@@ -413,7 +413,7 @@ NEXT_HAS_UI=$(echo "$NEXT_PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true
 
 ## ✓ Phase {Z} Complete
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Phase {Z+1}: {Name}** — {Goal from ROADMAP.md}
 
@@ -441,7 +441,7 @@ NEXT_HAS_UI=$(echo "$NEXT_PHASE_SECTION" | grep -qi "UI hint.*yes" && echo "true
 
 All {N} phases finished!
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Complete Milestone** — archive and prepare for next
 
@@ -472,7 +472,7 @@ Read MILESTONES.md to find the last completed milestone version.
 
 Ready to plan the next milestone.
 
-## ▶ Next Up
+## ▶ Next Up — [${PROJECT_CODE}] ${PROJECT_TITLE}
 
 **Start Next Milestone** — questioning → research → requirements → roadmap
 
@@ -492,7 +492,119 @@ Ready to plan the next milestone.
 - All work complete → offer milestone completion
 - Blockers present → highlight before offering to continue
 - Handoff file exists → mention it, offer `/gsd-resume-work ${GSD_WS}`
-  </step>
+</step>
+
+<step name="forensic_audit">
+**Forensic Integrity Audit** — only runs when `--forensic` is present in ARGUMENTS.
+
+If `--forensic` is NOT present in ARGUMENTS: skip this step entirely. Default progress behavior (standard report + routing) is unchanged.
+
+If `--forensic` IS present: after the standard report and routing suggestion have been displayed, append the following audit section.
+
+---
+
+## Forensic Integrity Audit
+
+Running 6 deep checks against project state...
+
+Run each check in order. For each check, emit ✓ (pass) or ⚠ (warning) with concrete evidence when a problem is found.
+
+**Check 1 — STATE vs artifact consistency**
+
+Read STATE.md `status` / `stopped_at` fields (from the STATE snapshot already loaded). Compare against the artifact count from the roadmap analysis. If STATE.md claims the current phase is pending/mid-flight but the artifact count shows it as complete (all PLAN.md files have matching SUMMARY.md files), flag inconsistency. Emit:
+- ✓ `STATE.md consistent with artifact count` — if both agree
+- ⚠ `STATE.md claims [status] but artifact count shows phase complete` — with the specific values
+
+**Check 2 — Orphaned handoff files**
+
+Check for existence of:
+```bash
+ls .planning/HANDOFF.json .planning/phases/*/.continue-here.md .planning/phases/*/*HANDOFF*.md 2>/dev/null || true
+```
+Also check `.planning/continue-here.md`.
+
+Emit:
+- ✓ `No orphaned handoff files` — if none found
+- ⚠ `Orphaned handoff files found` — list each file path, add: `→ Work was paused mid-flight. Read the handoff before continuing.`
+
+**Check 3 — Deferred scope drift**
+
+Search phase artifacts (CONTEXT.md, DISCUSSION-LOG.md, BUG-BRIEF.md, VERIFICATION.md, SUMMARY.md, HANDOFF.md files under `.planning/phases/`) for patterns:
+```bash
+grep -rl "defer to Phase\|future phase\|out of scope Phase\|deferred to Phase" .planning/phases/ 2>/dev/null || true
+```
+
+For each match, extract the referenced phase number. Cross-reference against ROADMAP.md phase list. If the referenced phase number is NOT in ROADMAP.md, flag as deferred scope not captured.
+
+Emit:
+- ✓ `All deferred scope captured in ROADMAP` — if no mismatches
+- ⚠ `Deferred scope references phase(s) not in ROADMAP` — list: file, reference text, missing phase number
+
+**Check 4 — Memory-flagged pending work**
+
+Check if `.planning/MEMORY.md` or `.planning/memory/` exists:
+```bash
+ls .planning/MEMORY.md .planning/memory/*.md 2>/dev/null || true
+```
+
+If found, grep for entries containing: `pending`, `status`, `deferred`, `not yet run`, `backfill`, `blocking`.
+
+Emit:
+- ✓ `No memory entries flagging pending work` — if none found or no MEMORY.md
+- ⚠ `Memory entries flag pending/deferred work` — list the matching lines (max 5, truncated at 80 chars)
+
+**Check 5 — Blocking operational todos**
+
+Check for pending todos:
+```bash
+ls .planning/todos/pending/*.md 2>/dev/null || true
+```
+
+For files found, scan for keywords indicating operational blockers: `script`, `credential`, `API key`, `manual`, `verification`, `setup`, `configure`, `run `.
+
+Emit:
+- ✓ `No blocking operational todos` — if no pending todos or none match operational keywords
+- ⚠ `Blocking operational todos found` — list the file names and matching keywords (max 5)
+
+**Check 6 — Uncommitted code**
+
+```bash
+git status --porcelain 2>/dev/null | grep -v "^??" | grep -v "^.planning\/" | grep -v "^\.\." | head -10
+```
+
+If output is non-empty (modified/staged files outside `.planning/`), flag as uncommitted code.
+
+Emit:
+- ✓ `Working tree clean` — if no modified files outside `.planning/`
+- ⚠ `Uncommitted changes in source files` — list up to 10 file paths
+
+---
+
+After all 6 checks, display the verdict:
+
+**If all 6 checks passed:**
+```
+### Verdict: CLEAN
+
+The standard progress report is trustworthy — proceed with the routing suggestion above.
+```
+
+**If 1 or more checks failed:**
+```
+### Verdict: N INTEGRITY ISSUE(S) FOUND
+
+The standard progress report may not reflect true project state.
+Review the flagged items above before acting on the routing suggestion.
+```
+
+Then for each failed check, add a concrete next action:
+- Check 2 (orphaned handoff): `Read the handoff file(s) and resume from where work was paused: /gsd-resume-work ${GSD_WS}`
+- Check 3 (deferred scope): `Add the missing phases to ROADMAP.md or update the deferred references`
+- Check 4 (memory pending): `Review the flagged memory entries and resolve or clear them`
+- Check 5 (blocking todos): `Complete the operational steps in .planning/todos/pending/ before continuing`
+- Check 6 (uncommitted code): `Commit or stash the uncommitted changes before advancing`
+- Check 1 (STATE inconsistency): `Run /gsd-verify-work ${PHASE} ${GSD_WS} to reconcile state`
+</step>
 
 </process>
 

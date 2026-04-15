@@ -105,13 +105,14 @@ People who want to describe what they want and have it built correctly — witho
 
 Built-in quality gates catch real problems: schema drift detection flags ORM changes missing migrations, security enforcement anchors verification to threat models, and scope reduction detection prevents the planner from silently dropping your requirements.
 
-### v1.34.0 Highlights
+### v1.36.0 Highlights
 
-- **Gates taxonomy** — 4 canonical gate types (pre-flight, revision, escalation, abort) wired into plan-checker and verifier agents
-- **Shell hooks fix** — `hooks/*.sh` files are now correctly included in the npm package, eliminating startup hook errors on fresh installs
-- **Post-merge hunk verification** — `reapply-patches` detects silently dropped hunks after three-way merge
-- **detectConfigDir fix** — Claude Code users no longer see false "update available" warnings when multiple runtimes are installed
-- **3 bug fixes** — Milestone backlog preservation, detectConfigDir priority, and npm package manifest
+- **Knowledge graph integration** — `/gsd-graphify` brings knowledge graphs to planning agents for richer context connections
+- **SDK typed query foundation** — Registry-based `gsd-sdk query` command with classified errors and handlers for state, roadmap, phase lifecycle, and config
+- **TDD pipeline mode** — Opt-in test-driven development workflow with `--tdd` flag
+- **Context-window-aware prompt thinning** — Automatic prompt size reduction for sub-200K models
+- **Project skills awareness** — 9 GSD agents now discover and use project-scoped skills
+- **30+ bug fixes** — Worktree safety, state management, installer paths, and health check optimizations
 
 ---
 
@@ -132,7 +133,9 @@ Verify with:
 - Cline: GSD installs via `.clinerules` — verify by checking `.clinerules` exists
 
 > [!NOTE]
-> Claude Code 2.1.88+, Qwen Code, and Codex install as skills (`skills/gsd-*/SKILL.md`). Older Claude Code versions use `commands/gsd/`. Cline uses `.clinerules` for configuration. The installer handles all formats automatically.
+> Claude Code 2.1.88+, Qwen Code, and Codex install as skills (`.claude/skills/`, `./.codex/skills/`, or the matching global `~/.claude/skills/` / `~/.codex/skills/` roots). Older Claude Code versions use `commands/gsd/`. `~/.claude/get-shit-done/skills/` is import-only for legacy migration. The installer handles all formats automatically.
+
+The canonical discovery contract is documented in [docs/skills/discovery-contract.md](docs/skills/discovery-contract.md).
 
 > [!TIP]
 > For source-based installs or environments where npm is unavailable, see **[docs/manual-update.md](docs/manual-update.md)**.
@@ -837,8 +840,9 @@ This prevents Claude from reading these files entirely, regardless of what comma
 
 **Commands not found after install?**
 - Restart your runtime to reload commands/skills
-- Verify files exist in `~/.claude/skills/gsd-*/SKILL.md` (Claude Code 2.1.88+) or `~/.claude/commands/gsd/` (legacy)
-- For Codex, verify skills exist in `~/.codex/skills/gsd-*/SKILL.md` (global) or `./.codex/skills/gsd-*/SKILL.md` (local)
+- Verify files exist in `~/.claude/skills/gsd-*/SKILL.md` or `~/.codex/skills/gsd-*/SKILL.md` for managed global installs
+- For local installs, verify `.claude/skills/gsd-*/SKILL.md` or `./.codex/skills/gsd-*/SKILL.md`
+- Legacy Claude Code installs still use `~/.claude/commands/gsd/`
 
 **Commands not working as expected?**
 - Run `/gsd-help` to verify installation
