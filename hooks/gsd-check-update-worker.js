@@ -50,11 +50,14 @@ const MANAGED_HOOKS = [
   'gsd-check-update-worker.js',
   'gsd-check-update.js',
   'gsd-context-monitor.js',
+  'gsd-graphify-update.sh',
   'gsd-phase-boundary.sh',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
+  'gsd-read-injection-scanner.js',
   'gsd-session-state.sh',
   'gsd-statusline.js',
+  'gsd-update-banner.js',
   'gsd-validate-commit.sh',
   'gsd-workflow-guard.js',
 ];
@@ -91,6 +94,13 @@ try {
     encoding: 'utf8',
     timeout: 10000,
     windowsHide: true,
+    // On Windows, 'npm' is distributed as npm.cmd. Node's execFileSync does
+    // not apply PATHEXT resolution and looks for a literal 'npm' binary,
+    // failing with ENOENT. Setting shell:true on Windows routes through
+    // cmd.exe which resolves npm.cmd via PATHEXT.
+    // POSIX (Linux/macOS) is left untouched — no shell spawn, no extra
+    // signal/exit-code semantics, no overhead.
+    shell: process.platform === 'win32',
   }).trim();
 } catch (e) {}
 

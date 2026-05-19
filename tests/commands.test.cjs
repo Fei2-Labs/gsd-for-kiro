@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * GSD Tools Tests - Commands
  */
@@ -1027,7 +1031,7 @@ describe('verify-path-exists command', () => {
     const absFile = path.join(tmpDir, 'abs-test.txt');
     fs.writeFileSync(absFile, 'content');
 
-    const result = runGsdTools(`verify-path-exists ${absFile}`, tmpDir);
+    const result = runGsdTools(['verify-path-exists', absFile], tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -1067,12 +1071,40 @@ describe('resolve-model command', () => {
     assert.strictEqual(output.unknown_agent, undefined, 'should not have unknown_agent for known agent');
   });
 
+  test('shipped-but-previously-missing agent resolves under quality profile (#3229)', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({ model_profile: 'quality' }));
+    const result = runGsdTools('resolve-model gsd-code-reviewer', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'opus');
+    assert.strictEqual(output.profile, 'quality');
+    assert.strictEqual(output.unknown_agent, undefined);
+  });
+
   test('unknown agent returns unknown_agent=true', () => {
     const result = runGsdTools('resolve-model fake-nonexistent-agent', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
     assert.strictEqual(output.unknown_agent, true, 'should flag unknown agent');
+  });
+
+  test('unknown agent uses quality-semantic fallback (opus)', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({ model_profile: 'quality' }));
+    const result = runGsdTools('resolve-model fake-nonexistent-agent', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'opus');
+    assert.strictEqual(output.unknown_agent, true);
+  });
+
+  test('unknown agent uses budget-semantic fallback (haiku)', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({ model_profile: 'budget' }));
+    const result = runGsdTools('resolve-model fake-nonexistent-agent', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'haiku');
+    assert.strictEqual(output.unknown_agent, true);
   });
 
   test('default profile fallback when no config exists', () => {
@@ -1083,6 +1115,57 @@ describe('resolve-model command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.profile, 'balanced', 'should default to balanced profile');
     assert.ok(output.model, 'should resolve a model');
+  });
+
+  test('includes reasoning_effort when selected runtime supports it', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({
+      model_profile: 'balanced',
+      runtime: 'codex',
+      models: { planning: 'opus' },
+    }));
+    const result = runGsdTools('resolve-model gsd-planner', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'gpt-5.4');
+    assert.strictEqual(output.profile, 'balanced');
+    assert.strictEqual(output.reasoning_effort, 'xhigh');
+  });
+
+  test('does not include reasoning_effort for unsupported runtime overrides', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({
+      model_profile: 'balanced',
+      runtime: 'opencode',
+      models: { planning: 'opus' },
+      model_profile_overrides: {
+        opencode: {
+          opus: { model: 'openrouter/openai/gpt-5.5', reasoning_effort: 'high' },
+        },
+      },
+    }));
+    const result = runGsdTools('resolve-model gsd-planner', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'openrouter/openai/gpt-5.5');
+    assert.strictEqual(output.profile, 'balanced');
+    assert.ok(!Object.prototype.hasOwnProperty.call(output, 'reasoning_effort'));
+  });
+
+  test('does not include reasoning_effort for per-agent model_overrides', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'config.json'), JSON.stringify({
+      model_profile: 'balanced',
+      runtime: 'codex',
+      models: { planning: 'opus' },
+      model_overrides: { 'gsd-planner': 'gpt-5.5' },
+    }));
+    const result = runGsdTools('resolve-model gsd-planner', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.model, 'gpt-5.5');
+    assert.strictEqual(output.profile, 'balanced');
+    assert.ok(!Object.prototype.hasOwnProperty.call(output, 'reasoning_effort'));
   });
 
   test('fails when no agent-type provided', () => {

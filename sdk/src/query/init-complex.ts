@@ -19,14 +19,28 @@
  */
 
 import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
 
 import { loadConfig } from '../config.js';
 import { resolveModel } from './config-query.js';
-import { planningPaths, normalizePhaseName, phaseTokenMatches, toPosixPath } from './helpers.js';
-import { getMilestoneInfo, extractCurrentMilestone } from './roadmap.js';
+import {
+  detectRuntime,
+  planningPaths,
+  normalizePhaseName,
+  phaseTokenMatches,
+  resolveAgentsDir,
+  toPosixPath,
+} from './helpers.js';
+import {
+  getMilestoneInfo,
+  extractCurrentMilestone,
+  extractNextMilestoneSection,
+  extractPhasesFromSection,
+} from './roadmap.js';
+import { agentSkills } from './skills.js';
 import { withProjectRoot } from './init.js';
 import type { QueryHandler } from './utils.js';
 
@@ -38,7 +52,7 @@ import type { QueryHandler } from './utils.js';
 async function getModelAlias(agentType: string, projectDir: string): Promise<string> {
   const result = await resolveModel([agentType], projectDir);
   const data = result.data as Record<string, unknown>;
-  return (data.model as string) || 'sonnet';
+  return typeof data.model === 'string' ? data.model : 'sonnet';
 }
 
 /**
@@ -46,6 +60,159 @@ async function getModelAlias(agentType: string, projectDir: string): Promise<str
  */
 function pathExists(base: string, relPath: string): boolean {
   return existsSync(join(base, relPath));
+}
+
+/**
+ * Bug #3491: detect whether `base` is inside any git worktree, and if so,
+ * return the absolute worktree root. Mirrors the CJS `gitWorktreeInfoInternal`
+ * in get-shit-done/bin/lib/core.cjs — keep these two implementations behaviour-
+ * identical so the SDK and CJS init handlers emit the same has_git semantics.
+ *
+ * Returns { inside, worktreeRoot } — both fall back to false/null on any error
+ * (git unavailable, not a repo, timeout) so callers see the conservative
+ * default that preserves pre-fix behaviour for non-git environments.
+ */
+function gitWorktreeInfo(base: string): { inside: boolean; worktreeRoot: string | null } {
+  try {
+    const inside = execSync('git rev-parse --is-inside-work-tree', {
+      cwd: base,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    }).trim();
+    if (inside !== 'true') return { inside: false, worktreeRoot: null };
+    try {
+      const root = execSync('git rev-parse --show-toplevel', {
+        cwd: base,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf-8',
+        timeout: 5000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      }).trim();
+      return { inside: true, worktreeRoot: root || null };
+    } catch {
+      return { inside: true, worktreeRoot: null };
+    }
+  } catch {
+    return { inside: false, worktreeRoot: null };
+  }
+}
+
+function detectNestedSubdir(base: string, info: { inside: boolean; worktreeRoot: string | null }): boolean {
+  if (!info.inside) return false;
+  try {
+    const prefix = execSync('git rev-parse --show-prefix', {
+      cwd: base,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    }).trim().replace(/\\/g, '/');
+    if (prefix.length > 0) return prefix !== '.' && prefix !== './';
+    return false;
+  } catch {}
+
+  if (!info.worktreeRoot) return false;
+  const normalize = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+  const root = normalize(info.worktreeRoot);
+  const cwd = normalize(base);
+  return root !== cwd;
+}
+
+
+const NEW_PROJECT_REQUIRED_AGENTS = [
+  'gsd-project-researcher',
+  'gsd-research-synthesizer',
+  'gsd-roadmapper',
+];
+
+function hasAgentDefinition(agentsDir: string, agent: string): boolean {
+  return existsSync(join(agentsDir, `${agent}.md`)) ||
+    existsSync(join(agentsDir, `${agent}.agent.md`));
+}
+
+async function resolveAgentSkillPayloadAgents(
+  requiredAgents: string[],
+  projectDir: string,
+): Promise<string[]> {
+  const available: string[] = [];
+  for (const agent of requiredAgents) {
+    const result = await agentSkills([agent], projectDir);
+    if (typeof result.data === 'string' && result.data.trim() !== '') {
+      available.push(agent);
+    }
+  }
+  return available;
+}
+
+/**
+ * Extract ROADMAP checkbox states: `- [x] Phase N` → true, `- [ ] Phase N` → false.
+ * Shared by initProgress and initManager so both treat ROADMAP as the
+ * fallback/override source of truth for completion.
+ */
+function extractCheckboxStates(content: string): Map<string, boolean> {
+  const states = new Map<string, boolean>();
+  const pattern = /-\s*\[(x| )\]\s*.*Phase\s+(\d+[A-Z]?(?:\.\d+)*)[:\s]/gi;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(content)) !== null) {
+    states.set(m[2], m[1].toLowerCase() === 'x');
+  }
+  return states;
+}
+
+/**
+ * Extract terminal phase markers from ROADMAP phase headings, e.g.
+ * `(COMPLETE)`, `(SHIPPED ...)`, `(DEFERRED)`, `(SUPERSEDED ...)`.
+ * These labels mean the phase should not be selected as next pending work.
+ */
+function extractTerminalStatusLabels(content: string): Set<string> {
+  const terminal = new Set<string>();
+  const headingPattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)/gi;
+  const terminalRe = /(?:\(|\*\*)\s*(SHIPPED|COMPLETE|DEFERRED|SUPERSEDED|MERGED\s+INTO|FOLDED\s+INTO)\b/i;
+  let m: RegExpExecArray | null;
+  while ((m = headingPattern.exec(content)) !== null) {
+    if (terminalRe.test(m[2])) {
+      terminal.add(m[1]);
+      terminal.add(m[1].replace(/^0+/, '') || '0');
+    }
+  }
+  return terminal;
+}
+
+/**
+ * Derive progress-level status from a ROADMAP checkbox when the phase has
+ * no on-disk directory. Returns 'complete' for `[x]`, 'not_started' otherwise.
+ * Disk status (when present) always wins — it's more recent truth for in-flight work.
+ */
+function deriveStatusFromCheckbox(
+  phaseNum: string,
+  checkboxStates: Map<string, boolean>,
+): 'complete' | 'not_started' {
+  const stripped = phaseNum.replace(/^0+/, '') || '0';
+  if (checkboxStates.get(phaseNum) === true) return 'complete';
+  if (checkboxStates.get(stripped) === true) return 'complete';
+  return 'not_started';
+}
+
+function listPhasePlanAndSummaryCounts(phasePath: string): { plans: string[]; summaries: string[] } {
+  const phaseFiles = readdirSync(phasePath);
+  const rootPlans = phaseFiles.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md');
+  const rootSummaries = phaseFiles.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
+
+  const plansDir = join(phasePath, 'plans');
+  let nestedPlans: string[] = [];
+  let nestedSummaries: string[] = [];
+  if (existsSync(plansDir)) {
+    const files = readdirSync(plansDir);
+    nestedPlans = files.filter(f => /^PLAN-\d+.*\.md$/i.test(f));
+    nestedSummaries = files.filter(f => /^SUMMARY-\d+.*\.md$/i.test(f));
+  }
+
+  return {
+    plans: rootPlans.concat(nestedPlans),
+    summaries: rootSummaries.concat(nestedSummaries),
+  };
 }
 
 // ─── initNewProject ───────────────────────────────────────────────────────
@@ -58,8 +225,8 @@ function pathExists(base: string, relPath: string): boolean {
  *
  * Port of cmdInitNewProject from init.cjs lines 296-399.
  */
-export const initNewProject: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
+export const initNewProject: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
 
   // Detect search API key availability from env vars and ~/.gsd/ files
   const gsdHome = join(homedir(), '.gsd');
@@ -135,6 +302,16 @@ export const initNewProject: QueryHandler = async (_args, projectDir) => {
     getModelAlias('gsd-research-synthesizer', projectDir),
     getModelAlias('gsd-roadmapper', projectDir),
   ]);
+  const runtime = detectRuntime(config as { runtime?: unknown });
+  const agentsDir = resolveAgentsDir(runtime);
+  const gitInfo = gitWorktreeInfo(projectDir);
+  const missingRequiredAgents = NEW_PROJECT_REQUIRED_AGENTS.filter(
+    agent => !hasAgentDefinition(agentsDir, agent),
+  );
+  const agentSkillPayloadAgents = await resolveAgentSkillPayloadAgents(
+    NEW_PROJECT_REQUIRED_AGENTS,
+    projectDir,
+  );
 
   const result: Record<string, unknown> = {
     researcher_model: researcherModel,
@@ -153,16 +330,26 @@ export const initNewProject: QueryHandler = async (_args, projectDir) => {
     needs_codebase_map:
       (hasExistingCode || hasPackageFile) && !pathExists(projectDir, '.planning/codebase'),
 
-    has_git: pathExists(projectDir, '.git'),
+    // Bug #3491: detect parent worktree to avoid nested .git init.
+    has_git: gitInfo.inside,
+    git_worktree_root: gitInfo.worktreeRoot,
+    in_nested_subdir: detectNestedSubdir(projectDir, gitInfo),
 
     brave_search_available: hasBraveSearch,
     firecrawl_available: hasFirecrawl,
     exa_search_available: hasExaSearch,
 
     project_path: '.planning/PROJECT.md',
+    agent_runtime: runtime,
+    agents_dir: agentsDir,
+    required_agents: NEW_PROJECT_REQUIRED_AGENTS,
+    required_agents_installed: missingRequiredAgents.length === 0,
+    missing_required_agents: missingRequiredAgents,
+    agent_skill_payloads_available: agentSkillPayloadAgents.length === NEW_PROJECT_REQUIRED_AGENTS.length,
+    agent_skill_payload_agents: agentSkillPayloadAgents,
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };
 
 // ─── initProgress ─────────────────────────────────────────────────────────
@@ -174,10 +361,10 @@ export const initNewProject: QueryHandler = async (_args, projectDir) => {
  *
  * Port of cmdInitProgress from init.cjs lines 1139-1284.
  */
-export const initProgress: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
-  const milestone = await getMilestoneInfo(projectDir);
-  const paths = planningPaths(projectDir);
+export const initProgress: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
+  const milestone = await getMilestoneInfo(projectDir, workstream);
+  const paths = planningPaths(projectDir, workstream);
 
   const phases: Record<string, unknown>[] = [];
   let currentPhase: Record<string, unknown> | null = null;
@@ -186,10 +373,12 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
   // Build set of phases from ROADMAP for the current milestone
   const roadmapPhaseNames = new Map<string, string>();
   const seenPhaseNums = new Set<string>();
+  let checkboxStates = new Map<string, boolean>();
+  let terminalLabels = new Set<string>();
 
   try {
     const rawRoadmap = await readFile(paths.roadmap, 'utf-8');
-    const roadmapContent = await extractCurrentMilestone(rawRoadmap, projectDir);
+    const roadmapContent = await extractCurrentMilestone(rawRoadmap, projectDir, workstream);
     const headingPattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)/gi;
     let hm: RegExpExecArray | null;
     while ((hm = headingPattern.exec(roadmapContent)) !== null) {
@@ -197,6 +386,8 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
       const pName = hm[2].replace(/\(INSERTED\)/i, '').trim();
       roadmapPhaseNames.set(pNum, pName);
     }
+    checkboxStates = extractCheckboxStates(roadmapContent);
+    terminalLabels = extractTerminalStatusLabels(roadmapContent);
   } catch { /* intentionally empty */ }
 
   // Scan phase directories
@@ -221,14 +412,27 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
       const phasePath = join(paths.phases, dir);
       const phaseFiles = readdirSync(phasePath);
 
-      const plans = phaseFiles.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md');
-      const summaries = phaseFiles.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
+      const { plans, summaries } = listPhasePlanAndSummaryCounts(phasePath);
       const hasResearch = phaseFiles.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
 
-      const status =
+      let status =
         summaries.length >= plans.length && plans.length > 0 ? 'complete' :
         plans.length > 0 ? 'in_progress' :
         hasResearch ? 'researched' : 'pending';
+
+      // #2674: align with initManager — a ROADMAP `- [x] Phase N` checkbox
+      // wins over disk state. A stub phase dir with no SUMMARY is leftover
+      // scaffolding; the user's explicit [x] is the authoritative signal.
+      const strippedNum = phaseNumber.replace(/^0+/, '') || '0';
+      const roadmapComplete =
+        checkboxStates.get(phaseNumber) === true ||
+        checkboxStates.get(strippedNum) === true;
+      if (roadmapComplete && status !== 'complete') {
+        status = 'complete';
+      }
+      if (terminalLabels.has(phaseNumber) || terminalLabels.has(strippedNum)) {
+        status = 'complete';
+      }
 
       const phaseInfo: Record<string, unknown> = {
         number: phaseNumber,
@@ -251,21 +455,24 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
     }
   } catch { /* intentionally empty */ }
 
-  // Add ROADMAP-only phases not yet on disk
+  // Add ROADMAP-only phases not yet on disk. For phases with a ROADMAP
+  // `[x]` checkbox, treat them as complete (#2646).
   for (const [num, name] of roadmapPhaseNames) {
     const stripped = num.replace(/^0+/, '') || '0';
     if (!seenPhaseNums.has(stripped)) {
+      const status = deriveStatusFromCheckbox(num, checkboxStates);
+      const terminalComplete = terminalLabels.has(num) || terminalLabels.has(stripped);
       const phaseInfo: Record<string, unknown> = {
         number: num,
         name: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
         directory: null,
-        status: 'not_started',
+        status: terminalComplete ? 'complete' : status,
         plan_count: 0,
         summary_count: 0,
         has_research: false,
       };
       phases.push(phaseInfo);
-      if (!nextPhase && !currentPhase) {
+      if (!nextPhase && !currentPhase && phaseInfo.status !== 'complete') {
         nextPhase = phaseInfo;
       }
     }
@@ -309,7 +516,7 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
     config_path: toPosixPath(relative(projectDir, paths.config)),
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };
 
 // ─── initManager ─────────────────────────────────────────────────────────
@@ -322,10 +529,10 @@ export const initProgress: QueryHandler = async (_args, projectDir) => {
  *
  * Port of cmdInitManager from init.cjs lines 854-1137.
  */
-export const initManager: QueryHandler = async (_args, projectDir) => {
-  const config = await loadConfig(projectDir);
-  const milestone = await getMilestoneInfo(projectDir);
-  const paths = planningPaths(projectDir);
+export const initManager: QueryHandler = async (_args, projectDir, workstream) => {
+  const config = await loadConfig(projectDir, workstream);
+  const milestone = await getMilestoneInfo(projectDir, workstream);
+  const paths = planningPaths(projectDir, workstream);
 
   let rawContent: string;
   try {
@@ -334,7 +541,7 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
     return { data: { error: 'No ROADMAP.md found. Run /gsd-new-milestone first.' } };
   }
 
-  const content = await extractCurrentMilestone(rawContent, projectDir);
+  const content = await extractCurrentMilestone(rawContent, projectDir, workstream);
 
   // Pre-compute directory listing once
   let phaseDirEntries: string[] = [];
@@ -344,13 +551,8 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
       .map(e => e.name);
   } catch { /* intentionally empty */ }
 
-  // Pre-extract checkbox states in a single pass
-  const checkboxStates = new Map<string, boolean>();
-  const cbPattern = /-\s*\[(x| )\]\s*.*Phase\s+(\d+[A-Z]?(?:\.\d+)*)[:\s]/gi;
-  let cbMatch: RegExpExecArray | null;
-  while ((cbMatch = cbPattern.exec(content)) !== null) {
-    checkboxStates.set(cbMatch[2], cbMatch[1].toLowerCase() === 'x');
-  }
+  // Pre-extract checkbox states in a single pass (shared helper — #2646)
+  const checkboxStates = extractCheckboxStates(content);
 
   const phasePattern = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:\s*([^\n]+)/gi;
   const phases: Record<string, unknown>[] = [];
@@ -386,8 +588,9 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
       if (dirMatch) {
         const fullDir = join(paths.phases, dirMatch);
         const phaseFiles = readdirSync(fullDir);
-        planCount = phaseFiles.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md').length;
-        summaryCount = phaseFiles.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md').length;
+        const counts = listPhasePlanAndSummaryCounts(fullDir);
+        planCount = counts.plans.length;
+        summaryCount = counts.summaries.length;
         hasContext = phaseFiles.some(f => f.endsWith('-CONTEXT.md') || f === 'CONTEXT.md');
         hasResearch = phaseFiles.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
 
@@ -458,16 +661,13 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
     }
   }
 
-  // Sliding window: only first undiscussed phase is available to discuss
-  let foundNextToDiscuss = false;
+  // Bug #2268: mark EVERY undiscussed phase as is_next_to_discuss, not just
+  // the first one.  Multiple independent phases can be discussed in parallel
+  // — the sliding-window pattern made the manager only recommend one
+  // discuss action even when callers had free capacity to discuss several.
   for (const phase of phases) {
     const status = phase.disk_status as string;
-    if (!foundNextToDiscuss && (status === 'empty' || status === 'no_directory')) {
-      phase.is_next_to_discuss = true;
-      foundNextToDiscuss = true;
-    } else {
-      phase.is_next_to_discuss = false;
-    }
+    phase.is_next_to_discuss = (status === 'empty' || status === 'no_directory');
   }
 
   // Check WAITING.json signal
@@ -543,6 +743,40 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
 
   const completedCount = phases.filter(p => p.disk_status === 'complete').length;
 
+  // ── Next-milestone surface (issue #2497) ───────────────────────────────
+  // Populate queued_phases + metadata with the milestone immediately after
+  // the active one, so the /gsd-manager dashboard can preview what's coming
+  // next without mixing it into the active phases grid. Empty/null when the
+  // active milestone is the last one in ROADMAP.
+  let queuedPhases: Record<string, unknown>[] = [];
+  let queuedMilestoneVersion: string | null = null;
+  let queuedMilestoneName: string | null = null;
+  try {
+    const next = await extractNextMilestoneSection(rawContent, projectDir);
+    if (next) {
+      queuedMilestoneVersion = next.version;
+      queuedMilestoneName = next.name;
+      queuedPhases = extractPhasesFromSection(next.section).map(p => {
+        const MAX_NAME_WIDTH = 20;
+        const display_name = p.name.length > MAX_NAME_WIDTH
+          ? p.name.slice(0, MAX_NAME_WIDTH - 1) + '…'
+          : p.name;
+        const depNums = p.depends_on && !/^none$/i.test(p.depends_on.trim())
+          ? (p.depends_on.match(/\d+(?:\.\d+)*/g) || [])
+          : [];
+        return {
+          number: p.number,
+          name: p.name,
+          display_name,
+          goal: p.goal,
+          depends_on: p.depends_on,
+          dep_phases: depNums,
+          deps_display: depNums.length > 0 ? depNums.join(',') : '—',
+        };
+      });
+    }
+  } catch { /* queued_phases is a non-critical enhancement */ }
+
   // Read manager flags from config
   const managerConfig = (config as Record<string, unknown>).manager as Record<string, Record<string, string>> | undefined;
   const sanitizeFlags = (raw: unknown): string => {
@@ -568,11 +802,14 @@ export const initManager: QueryHandler = async (_args, projectDir) => {
     recommended_actions: recommendedActions,
     waiting_signal: waitingSignal,
     all_complete: completedCount === phases.length && phases.length > 0,
+    queued_phases: queuedPhases,
+    queued_milestone_version: queuedMilestoneVersion,
+    queued_milestone_name: queuedMilestoneName,
     project_exists: pathExists(projectDir, '.planning/PROJECT.md'),
     roadmap_exists: true,
     state_exists: true,
     manager_flags: managerFlags,
   };
 
-  return { data: withProjectRoot(projectDir, result) };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };

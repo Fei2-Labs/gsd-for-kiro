@@ -22,12 +22,17 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, relative, basename } from 'node:path';
 import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
+import { GSDError, ErrorClassification } from '../errors.js';
 
-import { loadConfig } from '../config.js';
+import { loadConfig, type GSDConfig } from '../config.js';
 import { resolveModel, MODEL_PROFILES } from './config-query.js';
+import { maskIfSecret } from './secrets.js';
 import { findPhase } from './phase.js';
-import { roadmapGetPhase, getMilestoneInfo } from './roadmap.js';
-import { planningPaths, normalizePhaseName, toPosixPath } from './helpers.js';
+import { getMilestonePhaseFilter } from './state.js';
+import { roadmapGetPhase, getMilestoneInfo, extractCurrentMilestone, extractPhasesFromSection } from './roadmap.js';
+import { determinePhaseStatus } from './progress.js';
+import { planningPaths, normalizePhaseName, toPosixPath, resolveAgentsDir, detectRuntime } from './helpers.js';
+import { generatePhaseSlug, assertSafeProjectCode } from './phase-lifecycle-policy.js';
 import type { QueryHandler } from './utils.js';
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -52,11 +57,124 @@ function generateSlugInternal(text: string): string {
     .substring(0, 60);
 }
 
+function extractPhaseArg(args: string[]): string | undefined {
+  const equalsArg = args.find((arg) => arg.startsWith('--phase='));
+  if (equalsArg) {
+    const value = equalsArg.slice('--phase='.length).trim();
+    return value || undefined;
+  }
+
+  const flagIndex = args.indexOf('--phase');
+  if (flagIndex !== -1) {
+    const value = args[flagIndex + 1];
+    return value && !value.startsWith('--') ? value : undefined;
+  }
+
+  const first = args[0];
+  return first && !first.startsWith('--') ? first : undefined;
+}
+
 /**
  * Check if a path exists on disk.
  */
 function pathExists(base: string, relPath: string): boolean {
   return existsSync(join(base, relPath));
+}
+
+/**
+ * Bug #3491: detect whether `base` is inside any git worktree, and if so,
+ * return the absolute worktree root. Mirrors the CJS `gitWorktreeInfoInternal`
+ * in get-shit-done/bin/lib/core.cjs — keep these two implementations behaviour-
+ * identical so the SDK and CJS init handlers emit the same has_git semantics.
+ *
+ * Returns { inside, worktreeRoot } — both fall back to false/null on any error
+ * (git unavailable, not a repo, timeout) so callers see the conservative
+ * default that preserves pre-fix behaviour for non-git environments.
+ */
+function gitWorktreeInfo(base: string): { inside: boolean; worktreeRoot: string | null } {
+  try {
+    const inside = execSync('git rev-parse --is-inside-work-tree', {
+      cwd: base,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    }).trim();
+    if (inside !== 'true') return { inside: false, worktreeRoot: null };
+    try {
+      const root = execSync('git rev-parse --show-toplevel', {
+        cwd: base,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf-8',
+        timeout: 5000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      }).trim();
+      return { inside: true, worktreeRoot: root || null };
+    } catch {
+      return { inside: true, worktreeRoot: null };
+    }
+  } catch {
+    return { inside: false, worktreeRoot: null };
+  }
+}
+
+function detectNestedSubdir(base: string, info: { inside: boolean; worktreeRoot: string | null }): boolean {
+  if (!info.inside) return false;
+  try {
+    const prefix = execSync('git rev-parse --show-prefix', {
+      cwd: base,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    }).trim().replace(/\\/g, '/');
+    if (prefix.length > 0) return prefix !== '.' && prefix !== './';
+    return false;
+  } catch {}
+
+  if (!info.worktreeRoot) return false;
+  const normalize = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+  const root = normalize(info.worktreeRoot);
+  const cwd = normalize(base);
+  return root !== cwd;
+}
+
+
+/**
+ * Compute the canonical phase directory name for a known phase entry from the
+ * roadmap when no directory exists yet.  Applies the project_code prefix so
+ * the first-touch creation path used by /gsd-discuss-phase and /gsd-plan-phase
+ * stays consistent with the prefix produced by `phase.add` / `phase.insert`.
+ *
+ * Returns null when phaseNumber or phaseName cannot be determined.
+ */
+function computeExpectedPhaseDirName(
+  phaseNumber: string | null,
+  phaseName: string | null,
+  projectCode: string,
+): string | null {
+  if (!phaseNumber || !phaseName) return null;
+  const paddedNum = normalizePhaseName(phaseNumber);
+  const slug = generatePhaseSlug(phaseName);
+  if (!slug) return null;
+  const prefix = projectCode ? `${projectCode}-` : '';
+  return `${prefix}${paddedNum}-${slug}`;
+}
+
+async function shouldDropArchivedPhaseMatch(
+  phaseInfo: Record<string, unknown> | null,
+  roadmapPhase: Record<string, unknown> | null,
+  _projectDir: string,
+  _workstream?: string,
+): Promise<boolean> {
+  // Matches CJS cmdInitPlanPhase / cmdInitExecutePhase / cmdInitVerifyWork:
+  //   if (phaseInfo?.archived && roadmapPhase?.found) phaseInfo = null;
+  // Unconditional drop — the ROADMAP is authoritative for the current milestone,
+  // regardless of what archived milestone the on-disk match came from. Do NOT add
+  // a milestone-version equality check (#2391 regression risk).
+  if (!phaseInfo?.archived) return false;
+  if (!roadmapPhase || !roadmapPhase.found) return false;
+  return true;
 }
 
 /**
@@ -79,11 +197,16 @@ function getLatestCompletedMilestone(projectDir: string): { version: string; nam
 
 /**
  * Check which GSD agents are installed on disk.
+ *
+ * Runtime-aware per issue #2402: detects the invoking runtime
+ * (`GSD_RUNTIME` → `config.runtime` → 'claude') and probes that runtime's
+ * canonical `agents/` directory. `GSD_AGENTS_DIR` still short-circuits.
+ *
  * Port of checkAgentsInstalled from core.cjs lines 1274-1306.
  */
-function checkAgentsInstalled(): { agents_installed: boolean; missing_agents: string[] } {
-  const agentsDir = process.env.GSD_AGENTS_DIR
-    || join(homedir(), '.claude', 'get-shit-done', 'agents');
+function checkAgentsInstalled(config?: { runtime?: unknown }): { agents_installed: boolean; missing_agents: string[] } {
+  const runtime = detectRuntime(config);
+  const agentsDir = resolveAgentsDir(runtime);
   const expectedAgents = Object.keys(MODEL_PROFILES);
 
   if (!existsSync(agentsDir)) {
@@ -111,12 +234,22 @@ function checkAgentsInstalled(): { agents_installed: boolean; missing_agents: st
 async function getPhaseInfoWithFallback(
   phase: string,
   projectDir: string,
+  workstream?: string,
 ): Promise<{ phaseInfo: Record<string, unknown> | null; roadmapPhase: Record<string, unknown> | null }> {
-  const phaseResult = await findPhase([phase], projectDir);
+  const phaseResult = await findPhase([phase], projectDir, workstream);
   let phaseInfo = phaseResult.data as Record<string, unknown> | null;
+  // findPhase returns { found: false } when missing; findPhaseInternal returns null — align for init parity.
+  if (phaseInfo && phaseInfo.found === false) {
+    phaseInfo = null;
+  }
 
-  const roadmapResult = await roadmapGetPhase([phase], projectDir);
+  const roadmapResult = await roadmapGetPhase([phase], projectDir, workstream);
   const roadmapPhase = roadmapResult.data as Record<string, unknown> | null;
+
+  // Match init.cjs: drop archived disk match when the phase is listed in the current ROADMAP
+  if (await shouldDropArchivedPhaseMatch(phaseInfo, roadmapPhase, projectDir, workstream)) {
+    phaseInfo = null;
+  }
 
   // Fallback to ROADMAP.md if no phase directory exists yet
   if ((!phaseInfo || !phaseInfo.found) && roadmapPhase?.found) {
@@ -141,11 +274,57 @@ async function getPhaseInfoWithFallback(
 }
 
 /**
+ * Phase resolution for `init verify-work` — matches init.cjs cmdInitVerifyWork (archived + fallback).
+ */
+async function getPhaseInfoForVerifyWork(
+  phase: string,
+  projectDir: string,
+  workstream?: string,
+): Promise<{ phaseInfo: Record<string, unknown> | null }> {
+  const phaseResult = await findPhase([phase], projectDir, workstream);
+  let phaseInfo = phaseResult.data as Record<string, unknown> | null;
+  if (phaseInfo && phaseInfo.found === false) {
+    phaseInfo = null;
+  }
+
+  const roadmapResult = await roadmapGetPhase([phase], projectDir, workstream);
+  const roadmapPhase = roadmapResult.data as Record<string, unknown> | null;
+
+  if (await shouldDropArchivedPhaseMatch(phaseInfo, roadmapPhase, projectDir, workstream)) {
+    phaseInfo = null;
+  }
+
+  if (!phaseInfo && roadmapPhase?.found) {
+    const phaseName = roadmapPhase.phase_name as string;
+    phaseInfo = {
+      found: true,
+      directory: null,
+      phase_number: roadmapPhase.phase_number,
+      phase_name: phaseName,
+      phase_slug: phaseName ? generateSlugInternal(phaseName) : null,
+      plans: [],
+      summaries: [],
+      incomplete_plans: [],
+      has_research: false,
+      has_context: false,
+      has_verification: false,
+    };
+  }
+
+  return { phaseInfo };
+}
+
+/**
  * Extract requirement IDs from roadmap section text.
  */
 function extractReqIds(roadmapPhase: Record<string, unknown> | null): string | null {
   const section = roadmapPhase?.section as string | undefined;
-  const reqMatch = section?.match(/^\*\*Requirements\*\*:[^\S\n]*([^\n]*)$/m);
+  // Accept all bold/colon variants of the Requirements header. The forms
+  //   **Requirements:**  (colon inside bold)
+  //   **Requirements**:  (colon outside bold)
+  //   **Requirements** : (space before outside colon)
+  // render identically in markdown but differ textually. Issue #2769.
+  const reqMatch = section?.match(/^\*\*Requirements:?\*\*[^\S\n]*:?[^\S\n]*([^\n]*)$/m);
   const reqExtracted = reqMatch
     ? reqMatch[1].replace(/[\[\]]/g, '').split(',').map((s: string) => s.trim()).filter(Boolean).join(', ')
     : null;
@@ -158,7 +337,7 @@ function extractReqIds(roadmapPhase: Record<string, unknown> | null): string | n
  * Inject project_root, agents_installed, missing_agents, and response_language
  * into an init result object.
  *
- * Port of withProjectRoot from init.cjs lines 32-48.
+ * Port of withProjectRoot from init.cjs lines 32-63.
  *
  * @param projectDir - Absolute project root path
  * @param result - The result object to augment
@@ -172,13 +351,31 @@ export function withProjectRoot(
 ): Record<string, unknown> {
   result.project_root = projectDir;
 
-  const agentStatus = checkAgentsInstalled();
+  const agentStatus = checkAgentsInstalled(config);
   result.agents_installed = agentStatus.agents_installed;
   result.missing_agents = agentStatus.missing_agents;
 
   const responseLang = config?.response_language;
   if (responseLang) {
     result.response_language = responseLang;
+  }
+
+  const projectCode = config?.project_code;
+  if (projectCode) {
+    result.project_code = projectCode;
+  }
+
+  const projectMdPath = join(projectDir, '.planning', 'PROJECT.md');
+  try {
+    if (existsSync(projectMdPath)) {
+      const content = readFileSync(projectMdPath, 'utf-8');
+      const h1Match = content.match(/^#\s+(.+)$/m);
+      if (h1Match) {
+        result.project_title = h1Match[1].trim();
+      }
+    }
+  } catch {
+    /* intentionally empty */
   }
 
   return result;
@@ -190,26 +387,36 @@ export function withProjectRoot(
  * Init handler for execute-phase workflow.
  * Port of cmdInitExecutePhase from init.cjs lines 50-171.
  */
-export const initExecutePhase: QueryHandler = async (args, projectDir) => {
-  const phase = args[0];
+export const initExecutePhase: QueryHandler = async (args, projectDir, workstream) => {
+  const phase = extractPhaseArg(args);
   if (!phase) {
     return { data: { error: 'phase required for init execute-phase' } };
   }
 
-  const config = await loadConfig(projectDir);
-  const planningDir = join(projectDir, '.planning');
+  // --tdd is a boolean override of config.workflow.tdd_mode — matches the CJS
+  // path's parseNamedArgs(args, [], ['validate', 'tdd']) projection
+  // (bin/lib/init-command-router.cjs handler block) which passes options.tdd
+  // through to cmdInitExecutePhase. Without parsing here, `gsd-tools init
+  // execute-phase 1 --tdd` would never override a false config value.
+  const tddFlag = args.includes('--tdd');
 
-  const { phaseInfo, roadmapPhase } = await getPhaseInfoWithFallback(phase, projectDir);
+  const config = await loadConfig(projectDir);
+  const paths = planningPaths(projectDir, workstream);
+  const planningDir = paths.planning;
+
+  const { phaseInfo, roadmapPhase } = await getPhaseInfoWithFallback(phase, projectDir, workstream);
   const phase_req_ids = extractReqIds(roadmapPhase);
 
-  const [executorModel, verifierModel] = await Promise.all([
-    getModelAlias('gsd-executor', projectDir),
-    getModelAlias('gsd-verifier', projectDir),
-  ]);
+  const configExists = existsSync(join(planningDir, 'config.json'));
+  const [executorModel, verifierModel] = configExists
+    ? await Promise.all([
+        getModelAlias('gsd-executor', projectDir),
+        getModelAlias('gsd-verifier', projectDir),
+      ])
+    : ['', ''];
 
-  const milestone = await getMilestoneInfo(projectDir);
+  const milestone = await getMilestoneInfo(projectDir, workstream);
 
-  const phaseFound = !!(phaseInfo && phaseInfo.found);
   const phaseNumber = (phaseInfo?.phase_number as string) || null;
   const phaseSlug = (phaseInfo?.phase_slug as string) || null;
   const plans = (phaseInfo?.plans || []) as string[];
@@ -220,6 +427,7 @@ export const initExecutePhase: QueryHandler = async (args, projectDir) => {
   const result: Record<string, unknown> = {
     executor_model: executorModel,
     verifier_model: verifierModel,
+    tdd_mode: tddFlag || (config.workflow.tdd_mode ?? false),
     commit_docs: config.commit_docs,
     sub_repos: (config as Record<string, unknown>).sub_repos ?? [],
     parallelization: config.parallelization,
@@ -228,7 +436,7 @@ export const initExecutePhase: QueryHandler = async (args, projectDir) => {
     phase_branch_template: config.git.phase_branch_template,
     milestone_branch_template: config.git.milestone_branch_template,
     verifier_enabled: config.workflow.verifier,
-    phase_found: phaseFound,
+    phase_found: !!phaseInfo,
     phase_dir: (phaseInfo?.directory as string) ?? null,
     phase_number: phaseNumber,
     phase_name: (phaseInfo?.phase_name as string) ?? null,
@@ -254,7 +462,7 @@ export const initExecutePhase: QueryHandler = async (args, projectDir) => {
     milestone_slug: generateSlugInternal(milestone.name),
     state_exists: existsSync(join(planningDir, 'STATE.md')),
     roadmap_exists: existsSync(join(planningDir, 'ROADMAP.md')),
-    config_exists: existsSync(join(planningDir, 'config.json')),
+    config_exists: configExists,
     state_path: toPosixPath(relative(projectDir, join(planningDir, 'STATE.md'))),
     roadmap_path: toPosixPath(relative(projectDir, join(planningDir, 'ROADMAP.md'))),
     config_path: toPosixPath(relative(projectDir, join(planningDir, 'config.json'))),
@@ -269,44 +477,82 @@ export const initExecutePhase: QueryHandler = async (args, projectDir) => {
  * Init handler for plan-phase workflow.
  * Port of cmdInitPlanPhase from init.cjs lines 173-293.
  */
-export const initPlanPhase: QueryHandler = async (args, projectDir) => {
-  const phase = args[0];
+export const initPlanPhase: QueryHandler = async (args, projectDir, workstream) => {
+  const phase = extractPhaseArg(args);
   if (!phase) {
     return { data: { error: 'phase required for init plan-phase' } };
   }
 
-  const config = await loadConfig(projectDir);
-  const planningDir = join(projectDir, '.planning');
+  // --tdd boolean override (parity with CJS router's parseNamedArgs + the
+  // legacy cmdInitPlanPhase `options.tdd || config.tdd_mode || false`).
+  const tddFlag = args.includes('--tdd');
 
-  const { phaseInfo, roadmapPhase } = await getPhaseInfoWithFallback(phase, projectDir);
+  const config = await loadConfig(projectDir);
+  const paths = planningPaths(projectDir, workstream);
+  const planningDir = paths.planning;
+
+  const { phaseInfo, roadmapPhase } = await getPhaseInfoWithFallback(phase, projectDir, workstream);
   const phase_req_ids = extractReqIds(roadmapPhase);
 
-  const [researcherModel, plannerModel, checkerModel] = await Promise.all([
-    getModelAlias('gsd-phase-researcher', projectDir),
-    getModelAlias('gsd-planner', projectDir),
-    getModelAlias('gsd-plan-checker', projectDir),
-  ]);
+  const configExists = existsSync(join(planningDir, 'config.json'));
+  const [researcherModel, plannerModel, checkerModel] = configExists
+    ? await Promise.all([
+        getModelAlias('gsd-phase-researcher', projectDir),
+        getModelAlias('gsd-planner', projectDir),
+        getModelAlias('gsd-plan-checker', projectDir),
+      ])
+    : ['', '', ''];
 
-  const phaseFound = !!(phaseInfo && phaseInfo.found);
   const phaseNumber = (phaseInfo?.phase_number as string) || null;
+  const phaseName = (phaseInfo?.phase_name as string) ?? null;
+  const phaseDir = (phaseInfo?.directory as string) ?? null;
   const plans = (phaseInfo?.plans || []) as string[];
+  const summaries = (phaseInfo?.summaries || []) as string[];
 
+  // #3569: surface phase lifecycle status so /gsd-plan-phase can short-circuit
+  // on closed (Complete) phases instead of silently replanning over shipped
+  // code. Reuses determinePhaseStatus — the project-wide vocabulary used by
+  // `progress` (Pending | Planned | In Progress | Executed | Complete |
+  // Needs Review). When the phase has no directory on disk yet, treat it as
+  // Pending (it has not been started).
+  const phaseStatus = phaseDir
+    ? await determinePhaseStatus(plans.length, summaries.length, join(projectDir, phaseDir))
+    : 'Pending';
+
+  // #3287: compute the canonical directory name with project_code prefix so
+  // the first-touch mkdir in /gsd-plan-phase stays consistent with phase.add.
+  const rawProjectCode = (config as Record<string, unknown>).project_code as string || '';
+  assertSafeProjectCode(rawProjectCode);
+  const expectedPhaseDirName = phaseDir
+    ? null // directory already exists — no need to create
+    : computeExpectedPhaseDirName(phaseNumber, phaseName, rawProjectCode);
+  const expectedPhaseDir = expectedPhaseDirName
+    ? toPosixPath(relative(projectDir, join(paths.phases, expectedPhaseDirName)))
+    : null;
+
+  const cfg = config as GSDConfig;
   const result: Record<string, unknown> = {
     researcher_model: researcherModel,
     planner_model: plannerModel,
     checker_model: checkerModel,
+    tdd_mode: tddFlag || (config.workflow.tdd_mode ?? false),
     research_enabled: config.workflow.research,
     plan_checker_enabled: config.workflow.plan_check,
     nyquist_validation_enabled: config.workflow.nyquist_validation,
     commit_docs: config.commit_docs,
     text_mode: config.workflow.text_mode,
-    phase_found: phaseFound,
-    phase_dir: (phaseInfo?.directory as string) ?? null,
+    auto_advance: !!config.workflow.auto_advance,
+    auto_chain_active: !!config.workflow._auto_chain_active,
+    mode: cfg.mode ?? 'interactive',
+    phase_found: !!phaseInfo,
+    phase_dir: phaseDir,
+    expected_phase_dir: expectedPhaseDir,
     phase_number: phaseNumber,
-    phase_name: (phaseInfo?.phase_name as string) ?? null,
+    phase_name: phaseName,
     phase_slug: (phaseInfo?.phase_slug as string) ?? null,
     padded_phase: phaseNumber ? normalizePhaseName(phaseNumber) : null,
     phase_req_ids,
+    phase_status: phaseStatus,
     has_research: (phaseInfo?.has_research as boolean) || false,
     has_context: (phaseInfo?.has_context as boolean) || false,
     has_reviews: (phaseInfo?.has_reviews as boolean) || false,
@@ -317,23 +563,26 @@ export const initPlanPhase: QueryHandler = async (args, projectDir) => {
     state_path: toPosixPath(relative(projectDir, join(planningDir, 'STATE.md'))),
     roadmap_path: toPosixPath(relative(projectDir, join(planningDir, 'ROADMAP.md'))),
     requirements_path: toPosixPath(relative(projectDir, join(planningDir, 'REQUIREMENTS.md'))),
+    patterns_path: null,
   };
 
   // Add artifact paths if phase directory exists
-  if (phaseInfo?.directory) {
-    const phaseDirFull = join(projectDir, phaseInfo.directory as string);
+  if (phaseDir) {
+    const phaseDirFull = join(projectDir, phaseDir);
     try {
       const files = readdirSync(phaseDirFull);
       const contextFile = files.find(f => f.endsWith('-CONTEXT.md') || f === 'CONTEXT.md');
-      if (contextFile) result.context_path = toPosixPath(join(phaseInfo.directory as string, contextFile));
+      if (contextFile) result.context_path = toPosixPath(join(phaseDir, contextFile));
       const researchFile = files.find(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
-      if (researchFile) result.research_path = toPosixPath(join(phaseInfo.directory as string, researchFile));
+      if (researchFile) result.research_path = toPosixPath(join(phaseDir, researchFile));
       const verificationFile = files.find(f => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md');
-      if (verificationFile) result.verification_path = toPosixPath(join(phaseInfo.directory as string, verificationFile));
+      if (verificationFile) result.verification_path = toPosixPath(join(phaseDir, verificationFile));
       const uatFile = files.find(f => f.endsWith('-UAT.md') || f === 'UAT.md');
-      if (uatFile) result.uat_path = toPosixPath(join(phaseInfo.directory as string, uatFile));
+      if (uatFile) result.uat_path = toPosixPath(join(phaseDir, uatFile));
       const reviewsFile = files.find(f => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md');
-      if (reviewsFile) result.reviews_path = toPosixPath(join(phaseInfo.directory as string, reviewsFile));
+      if (reviewsFile) result.reviews_path = toPosixPath(join(phaseDir, reviewsFile));
+      const patternsFile = files.find(f => f.endsWith('-PATTERNS.md') || f === 'PATTERNS.md');
+      if (patternsFile) result.patterns_path = toPosixPath(join(phaseDir, patternsFile));
     } catch { /* intentionally empty */ }
   }
 
@@ -356,8 +605,14 @@ export const initNewMilestone: QueryHandler = async (_args, projectDir) => {
   let phaseDirCount = 0;
   try {
     if (existsSync(phasesDir)) {
+      // Bug #2445 parity with CJS `cmdInitNewMilestone`: filter phase dirs
+      // to the current milestone so stale dirs from a prior milestone that
+      // weren't archived don't inflate the count. Without this filter the
+      // SDK returns the full directory count, which the new-milestone
+      // workflow then uses to gate "is this a fresh start" decisions.
+      const isDirInMilestone = await getMilestonePhaseFilter(projectDir);
       phaseDirCount = readdirSync(phasesDir, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
+        .filter(entry => entry.isDirectory() && isDirInMilestone(entry.name))
         .length;
     }
   } catch { /* intentionally empty */ }
@@ -423,12 +678,15 @@ export const initQuick: QueryHandler = async (args, projectDir) => {
         .replace('{slug}', branchSlug)
     : null;
 
-  const [plannerModel, executorModel, checkerModel, verifierModel] = await Promise.all([
-    getModelAlias('gsd-planner', projectDir),
-    getModelAlias('gsd-executor', projectDir),
-    getModelAlias('gsd-plan-checker', projectDir),
-    getModelAlias('gsd-verifier', projectDir),
-  ]);
+  const configExists = existsSync(join(planningDir, 'config.json'));
+  const [plannerModel, executorModel, checkerModel, verifierModel] = configExists
+    ? await Promise.all([
+        getModelAlias('gsd-planner', projectDir),
+        getModelAlias('gsd-executor', projectDir),
+        getModelAlias('gsd-plan-checker', projectDir),
+        getModelAlias('gsd-verifier', projectDir),
+      ])
+    : ['', '', '', ''];
 
   const result: Record<string, unknown> = {
     planner_model: plannerModel,
@@ -488,25 +746,28 @@ export const initResume: QueryHandler = async (_args, projectDir) => {
  * Init handler for verify-work workflow.
  * Port of cmdInitVerifyWork from init.cjs lines 538-586.
  */
-export const initVerifyWork: QueryHandler = async (args, projectDir) => {
-  const phase = args[0];
+export const initVerifyWork: QueryHandler = async (args, projectDir, workstream) => {
+  const phase = extractPhaseArg(args);
   if (!phase) {
     return { data: { error: 'phase required for init verify-work' } };
   }
 
-  const config = await loadConfig(projectDir);
-  const { phaseInfo } = await getPhaseInfoWithFallback(phase, projectDir);
+  const config = await loadConfig(projectDir, workstream);
+  const { phaseInfo } = await getPhaseInfoForVerifyWork(phase, projectDir, workstream);
 
-  const [plannerModel, checkerModel] = await Promise.all([
-    getModelAlias('gsd-planner', projectDir),
-    getModelAlias('gsd-plan-checker', projectDir),
-  ]);
+  const configExists = existsSync(join(projectDir, '.planning', 'config.json'));
+  const [plannerModel, checkerModel] = configExists
+    ? await Promise.all([
+        getModelAlias('gsd-planner', projectDir),
+        getModelAlias('gsd-plan-checker', projectDir),
+      ])
+    : ['', ''];
 
   const result: Record<string, unknown> = {
     planner_model: plannerModel,
     checker_model: checkerModel,
     commit_docs: config.commit_docs,
-    phase_found: !!(phaseInfo && phaseInfo.found),
+    phase_found: !!phaseInfo,
     phase_dir: (phaseInfo?.directory as string) ?? null,
     phase_number: (phaseInfo?.phase_number as string) ?? null,
     phase_name: (phaseInfo?.phase_name as string) ?? null,
@@ -522,24 +783,25 @@ export const initVerifyWork: QueryHandler = async (args, projectDir) => {
  * Init handler for discuss-phase and similar phase operations.
  * Port of cmdInitPhaseOp from init.cjs lines 588-697.
  */
-export const initPhaseOp: QueryHandler = async (args, projectDir) => {
-  const phase = args[0];
+export const initPhaseOp: QueryHandler = async (args, projectDir, workstream) => {
+  const phase = extractPhaseArg(args);
   if (!phase) {
     return { data: { error: 'phase required for init phase-op' } };
   }
 
   const config = await loadConfig(projectDir);
-  const planningDir = join(projectDir, '.planning');
+  const paths = planningPaths(projectDir, workstream);
+  const planningDir = paths.planning;
 
   // findPhase with archived override: if only match is archived, prefer ROADMAP
-  const phaseResult = await findPhase([phase], projectDir);
+  const phaseResult = await findPhase([phase], projectDir, workstream);
   let phaseInfo = phaseResult.data as Record<string, unknown> | null;
 
-  const roadmapResult = await roadmapGetPhase([phase], projectDir);
+  const roadmapResult = await roadmapGetPhase([phase], projectDir, workstream);
   const roadmapPhase = roadmapResult.data as Record<string, unknown> | null;
 
   // If the only match comes from an archived milestone, prefer current ROADMAP
-  if (phaseInfo?.archived && roadmapPhase?.found) {
+  if (roadmapPhase?.found && await shouldDropArchivedPhaseMatch(phaseInfo, roadmapPhase, projectDir, workstream)) {
     const phaseName = roadmapPhase.phase_name as string;
     phaseInfo = {
       found: true,
@@ -578,17 +840,36 @@ export const initPhaseOp: QueryHandler = async (args, projectDir) => {
 
   const phaseFound = !!(phaseInfo && phaseInfo.found);
   const phaseNumber = (phaseInfo?.phase_number as string) || null;
+  const phaseName = (phaseInfo?.phase_name as string) ?? null;
+  const phaseDir = (phaseInfo?.directory as string) ?? null;
   const plans = (phaseInfo?.plans || []) as string[];
+
+  // #3287: compute the canonical directory name with project_code prefix so
+  // the first-touch mkdir in /gsd-discuss-phase stays consistent with phase.add.
+  const rawProjectCode = (config as Record<string, unknown>).project_code as string || '';
+  assertSafeProjectCode(rawProjectCode);
+  const expectedPhaseDirName = phaseDir
+    ? null // directory already exists — no need to create
+    : computeExpectedPhaseDirName(phaseNumber, phaseName, rawProjectCode);
+  const expectedPhaseDir = expectedPhaseDirName
+    ? toPosixPath(relative(projectDir, join(paths.phases, expectedPhaseDirName)))
+    : null;
 
   const result: Record<string, unknown> = {
     commit_docs: config.commit_docs,
-    brave_search: config.brave_search,
-    firecrawl: config.firecrawl,
-    exa_search: config.exa_search,
+    // #2997: secret config keys (brave_search, firecrawl, exa_search) may be
+    // either boolean availability flags OR string API keys depending on how the
+    // user configured them. Pass booleans through; mask string values so the
+    // init bundle never echoes plaintext credentials. Mirrors the masking added
+    // to config-get/config-set in the same fix.
+    brave_search: typeof config.brave_search === 'string' ? maskIfSecret('brave_search', config.brave_search) : config.brave_search,
+    firecrawl: typeof config.firecrawl === 'string' ? maskIfSecret('firecrawl', config.firecrawl) : config.firecrawl,
+    exa_search: typeof config.exa_search === 'string' ? maskIfSecret('exa_search', config.exa_search) : config.exa_search,
     phase_found: phaseFound,
-    phase_dir: (phaseInfo?.directory as string) ?? null,
+    phase_dir: phaseDir,
+    expected_phase_dir: expectedPhaseDir,
     phase_number: phaseNumber,
-    phase_name: (phaseInfo?.phase_name as string) ?? null,
+    phase_name: phaseName,
     phase_slug: (phaseInfo?.phase_slug as string) ?? null,
     padded_phase: phaseNumber ? normalizePhaseName(phaseNumber) : null,
     has_research: (phaseInfo?.has_research as boolean) || false,
@@ -605,20 +886,20 @@ export const initPhaseOp: QueryHandler = async (args, projectDir) => {
   };
 
   // Add artifact paths if phase directory exists
-  if (phaseInfo?.directory) {
-    const phaseDirFull = join(projectDir, phaseInfo.directory as string);
+  if (phaseDir) {
+    const phaseDirFull = join(projectDir, phaseDir);
     try {
       const files = readdirSync(phaseDirFull);
       const contextFile = files.find(f => f.endsWith('-CONTEXT.md') || f === 'CONTEXT.md');
-      if (contextFile) result.context_path = toPosixPath(join(phaseInfo.directory as string, contextFile));
+      if (contextFile) result.context_path = toPosixPath(join(phaseDir, contextFile));
       const researchFile = files.find(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
-      if (researchFile) result.research_path = toPosixPath(join(phaseInfo.directory as string, researchFile));
+      if (researchFile) result.research_path = toPosixPath(join(phaseDir, researchFile));
       const verificationFile = files.find(f => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md');
-      if (verificationFile) result.verification_path = toPosixPath(join(phaseInfo.directory as string, verificationFile));
+      if (verificationFile) result.verification_path = toPosixPath(join(phaseDir, verificationFile));
       const uatFile = files.find(f => f.endsWith('-UAT.md') || f === 'UAT.md');
-      if (uatFile) result.uat_path = toPosixPath(join(phaseInfo.directory as string, uatFile));
+      if (uatFile) result.uat_path = toPosixPath(join(phaseDir, uatFile));
       const reviewsFile = files.find(f => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md');
-      if (reviewsFile) result.reviews_path = toPosixPath(join(phaseInfo.directory as string, reviewsFile));
+      if (reviewsFile) result.reviews_path = toPosixPath(join(phaseDir, reviewsFile));
     } catch { /* intentionally empty */ }
   }
 
@@ -688,30 +969,83 @@ export const initTodos: QueryHandler = async (args, projectDir) => {
  * Init handler for complete-milestone and audit-milestone workflows.
  * Port of cmdInitMilestoneOp from init.cjs lines 758-817.
  */
-export const initMilestoneOp: QueryHandler = async (_args, projectDir) => {
+export const initMilestoneOp: QueryHandler = async (_args, projectDir, workstream) => {
   const config = await loadConfig(projectDir);
-  const planningDir = join(projectDir, '.planning');
-  const milestone = await getMilestoneInfo(projectDir);
+  const paths = planningPaths(projectDir, workstream);
+  const planningDir = paths.planning;
+  const milestone = await getMilestoneInfo(projectDir, workstream);
 
   const phasesDir = join(planningDir, 'phases');
   let phaseCount = 0;
   let completedPhases = 0;
 
+  // Bug #2633 — ROADMAP.md (current milestone section) is the authority for
+  // phase counts, NOT the on-disk `.planning/phases/` directory. After
+  // `phases clear` between milestones, on-disk dirs will be a subset of the
+  // roadmap until each phase is materialized, and reading from disk causes
+  // `all_phases_complete: true` to fire as soon as the materialized subset
+  // gets summaries — even though the roadmap has phases still to do.
+  let roadmapPhaseNumbers: string[] = [];
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const roadmapRaw = await readFile(join(planningDir, 'ROADMAP.md'), 'utf-8');
+    const currentSection = await extractCurrentMilestone(roadmapRaw, projectDir, workstream);
+    roadmapPhaseNumbers = extractPhasesFromSection(currentSection).map(p => p.number);
+  } catch { /* intentionally empty */ }
+
+  // Build the on-disk index keyed by the canonical full phase token (e.g.
+  // "3", "3A", "3.1") so distinct tokens with the same integer prefix never
+  // collide. Roadmap writes "Phase 3", "Phase 3A", and "Phase 3.1" as
+  // distinct phases and disk dirs preserve those tokens.
+  // Canonicalize a phase token by stripping leading zeros from the integer
+  // head while preserving any [A-Z]? suffix and dotted segments. So "03" →
+  // "3", "03A" → "3A", "03.1" → "3.1", "3A" → "3A". This lets disk dirs that
+  // pad ("03-alpha") match roadmap tokens ("Phase 3") without ever collapsing
+  // distinct tokens like "3" / "3A" / "3.1" into the same bucket.
+  const canonicalizePhase = (tok: string): string => {
+    const m = tok.match(/^(\d+)([A-Z]?(?:\.\d+)*)$/);
+    return m ? String(parseInt(m[1], 10)) + m[2] : tok;
+  };
+  const diskPhaseDirs: Map<string, string> = new Map();
   try {
     const entries = readdirSync(phasesDir, { withFileTypes: true });
-    const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
-    phaseCount = dirs.length;
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const m = e.name.match(/^(\d+[A-Z]?(?:\.\d+)*)/);
+      if (!m) continue;
+      diskPhaseDirs.set(canonicalizePhase(m[1]), e.name);
+    }
+  } catch { /* intentionally empty */ }
 
-    for (const dir of dirs) {
+  if (roadmapPhaseNumbers.length > 0) {
+    phaseCount = roadmapPhaseNumbers.length;
+    for (const num of roadmapPhaseNumbers) {
+      const dirName = diskPhaseDirs.get(canonicalizePhase(num));
+      if (!dirName) continue;
       try {
-        const phaseFiles = readdirSync(join(phasesDir, dir));
+        const phaseFiles = readdirSync(join(phasesDir, dirName));
         const hasSummary = phaseFiles.some(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
         if (hasSummary) completedPhases++;
       } catch { /* intentionally empty */ }
     }
-  } catch { /* intentionally empty */ }
+  } else {
+    // Fallback: no parseable ROADMAP (e.g. brand-new project). Preserve the
+    // legacy on-disk-count behavior so existing no-roadmap tests still pass.
+    try {
+      const entries = readdirSync(phasesDir, { withFileTypes: true });
+      const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+      phaseCount = dirs.length;
+      for (const dir of dirs) {
+        try {
+          const phaseFiles = readdirSync(join(phasesDir, dir));
+          const hasSummary = phaseFiles.some(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
+          if (hasSummary) completedPhases++;
+        } catch { /* intentionally empty */ }
+      }
+    } catch { /* intentionally empty */ }
+  }
 
-  const archiveDir = join(projectDir, '.planning', 'archive');
+  const archiveDir = join(planningDir, 'archive');
   let archivedMilestones: string[] = [];
   try {
     archivedMilestones = readdirSync(archiveDir, { withFileTypes: true })
@@ -747,6 +1081,7 @@ export const initMilestoneOp: QueryHandler = async (_args, projectDir) => {
  */
 export const initMapCodebase: QueryHandler = async (_args, projectDir) => {
   const config = await loadConfig(projectDir);
+  const now = new Date();
   const codebaseDir = join(projectDir, '.planning', 'codebase');
   let existingMaps: string[] = [];
   try {
@@ -760,7 +1095,14 @@ export const initMapCodebase: QueryHandler = async (_args, projectDir) => {
     commit_docs: config.commit_docs,
     search_gitignored: config.search_gitignored,
     parallelization: config.parallelization,
-    subagent_timeout: (config as Record<string, unknown>).subagent_timeout ?? undefined,
+    // subagent_timeout lives at workflow.subagent_timeout per the canonical
+    // Configuration manifest (sdk/shared/config-defaults.manifest.json). Reading
+    // the top-level config.subagent_timeout returned undefined, so the workflow
+    // step that consumes this value had to invent its own fallback. Default to
+    // 300000 (5 min) per the manifest. (#1472)
+    subagent_timeout: (((config as Record<string, unknown>).workflow as Record<string, unknown> | undefined)?.subagent_timeout as number | undefined) ?? 300000,
+    date: now.toISOString().split('T')[0],
+    timestamp: now.toISOString(),
     codebase_dir: '.planning/codebase',
     existing_maps: existingMaps,
     has_maps: existingMaps.length > 0,
@@ -880,12 +1222,18 @@ export const initListWorkspaces: QueryHandler = async (_args, _projectDir) => {
 export const initRemoveWorkspace: QueryHandler = async (args, _projectDir) => {
   const name = args[0];
   if (!name) {
-    return { data: { error: 'workspace name required for init remove-workspace' } };
+    // Throw so the CLI dispatcher projects a non-zero exit + writes the message
+    // to stderr — returning `{ data: { error } }` was treated as success by
+    // the CLI output path, hiding the validation failure from callers.
+    throw new GSDError('workspace name required for init remove-workspace', ErrorClassification.Validation);
   }
 
   // T-14-01: Reject path traversal attempts
   if (name.includes('/') || name.includes('\\') || name.includes('..')) {
-    return { data: { error: `Invalid workspace name: ${name} (path separators not allowed)` } };
+    throw new GSDError(
+      `Invalid workspace name: ${name} (path separators not allowed)`,
+      ErrorClassification.Validation,
+    );
   }
 
   const home = process.env.HOME || homedir();
@@ -894,7 +1242,7 @@ export const initRemoveWorkspace: QueryHandler = async (args, _projectDir) => {
   const manifestPath = join(wsPath, 'WORKSPACE.md');
 
   if (!existsSync(wsPath)) {
-    return { data: { error: `Workspace not found: ${wsPath}` } };
+    throw new GSDError(`Workspace not found: ${wsPath}`, ErrorClassification.Validation);
   }
 
   const repos: Array<Record<string, unknown>> = [];
@@ -941,16 +1289,26 @@ export const initRemoveWorkspace: QueryHandler = async (args, _projectDir) => {
 
   return { data: result };
 };
+// ─── initIngestDocs ───────────────────────────────────────────────────────
 
-// ─── docsInit ────────────────────────────────────────────────────────────
-
-export const docsInit: QueryHandler = async (_args, projectDir) => {
-  return {
-    data: {
-      project_exists: existsSync(join(projectDir, '.planning', 'PROJECT.md')),
-      roadmap_exists: existsSync(join(projectDir, '.planning', 'ROADMAP.md')),
-      docs_dir: '.planning/docs',
-      project_root: projectDir,
-    },
+/**
+ * Init handler for ingest-docs workflow.
+ * Mirrors `initResume` shape but without current-agent-id lookup — the
+ * ingest-docs workflow reads `project_exists`, `planning_exists`, `has_git`,
+ * and `project_path` to branch between new-project vs merge-milestone modes.
+ */
+export const initIngestDocs: QueryHandler = async (_args, projectDir) => {
+  const config = await loadConfig(projectDir);
+  const gitInfo = gitWorktreeInfo(projectDir);
+  const result: Record<string, unknown> = {
+    project_exists: pathExists(projectDir, '.planning/PROJECT.md'),
+    planning_exists: pathExists(projectDir, '.planning'),
+    // Bug #3491: detect parent worktree to avoid nested .git init.
+    has_git: gitInfo.inside,
+    git_worktree_root: gitInfo.worktreeRoot,
+    in_nested_subdir: detectNestedSubdir(projectDir, gitInfo),
+    project_path: '.planning/PROJECT.md',
+    commit_docs: config.commit_docs,
   };
+  return { data: withProjectRoot(projectDir, result, config as Record<string, unknown>) };
 };

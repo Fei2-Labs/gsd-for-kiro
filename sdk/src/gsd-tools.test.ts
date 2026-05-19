@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { GSDTools, GSDToolsError, resolveGsdToolsPath } from './gsd-tools.js';
+import { setTransportPolicy, clearTransportPolicy } from './gsd-transport-policy.js';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,6 +23,7 @@ describe('GSDTools', () => {
   });
 
   afterEach(async () => {
+    clearTransportPolicy();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -43,7 +45,7 @@ describe('GSDTools', () => {
         `process.stdout.write(JSON.stringify({ status: "ok", count: 42 }));`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.exec('state', ['load']);
 
       expect(result).toEqual({ status: 'ok', count: 42 });
@@ -61,7 +63,7 @@ describe('GSDTools', () => {
         `process.stdout.write('@file:${resultFile.replace(/\\/g, '\\\\')}');`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.exec('state', ['load']);
 
       expect(result).toEqual(bigData);
@@ -73,7 +75,7 @@ describe('GSDTools', () => {
         `// outputs nothing`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.exec('state', ['load']);
 
       expect(result).toBeNull();
@@ -85,7 +87,7 @@ describe('GSDTools', () => {
         `process.stderr.write('something went wrong\\n'); process.exit(1);`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
 
       try {
         await tools.exec('state', ['load']);
@@ -104,6 +106,7 @@ describe('GSDTools', () => {
       const tools = new GSDTools({
         projectDir: tmpDir,
         gsdToolsPath: '/nonexistent/path/gsd-tools.cjs',
+        preferNativeQuery: false,
       });
 
       await expect(tools.exec('state', ['load'])).rejects.toThrow(GSDToolsError);
@@ -115,7 +118,7 @@ describe('GSDTools', () => {
         `process.stdout.write('Not JSON at all');`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
 
       try {
         await tools.exec('state', ['load']);
@@ -134,7 +137,7 @@ describe('GSDTools', () => {
         `process.stdout.write('@file:/tmp/does-not-exist-${Date.now()}.json');`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
 
       await expect(tools.exec('state', ['load'])).rejects.toThrow(GSDToolsError);
     });
@@ -149,6 +152,7 @@ describe('GSDTools', () => {
         projectDir: tmpDir,
         gsdToolsPath: scriptPath,
         timeoutMs: 500,
+        preferNativeQuery: false,
       });
 
       try {
@@ -160,6 +164,67 @@ describe('GSDTools', () => {
         expect(gsdErr.message).toContain('timed out');
       }
     }, 10_000);
+
+    it('uses subprocess fallback when native handler throws and policy allows fallback', async () => {
+      const scriptPath = await createScript(
+        'fallback-ok.cjs',
+        `process.stdout.write(JSON.stringify({ from: 'subprocess-fallback' }));`,
+      );
+
+      const tools = new GSDTools({
+        projectDir: tmpDir,
+        gsdToolsPath: scriptPath,
+        allowFallbackToSubprocess: true,
+      });
+      setTransportPolicy('verify.path-exists', { allowFallbackToSubprocess: true });
+
+      const result = await tools.exec('verify.path-exists', []);
+      expect(result).toEqual({ from: 'subprocess-fallback' });
+    });
+
+    it('fails fast in strictSdk mode when command has no native adapter', async () => {
+      const scriptPath = await createScript(
+        'strict-should-not-run.cjs',
+        `process.stdout.write(JSON.stringify({ should: 'not-run' }));`,
+      );
+
+      const tools = new GSDTools({
+        projectDir: tmpDir,
+        gsdToolsPath: scriptPath,
+        strictSdk: true,
+        allowFallbackToSubprocess: true,
+      });
+
+      await expect(tools.exec('graphify', [])).rejects.toThrow(
+        "Strict SDK mode: command 'graphify' has no native adapter",
+      );
+    });
+
+    it('preserves GSDToolsError contract when native handler throws and fallback disabled', async () => {
+      const scriptPath = await createScript(
+        'should-not-run.cjs',
+        `process.stdout.write(JSON.stringify({ should: 'not-run' }));`,
+      );
+
+      const tools = new GSDTools({
+        projectDir: tmpDir,
+        gsdToolsPath: scriptPath,
+        allowFallbackToSubprocess: false,
+      });
+      setTransportPolicy('verify.path-exists', { allowFallbackToSubprocess: false });
+
+      try {
+        await tools.exec('verify.path-exists', []);
+        expect.fail('Should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(GSDToolsError);
+        const gsdErr = err as GSDToolsError;
+        expect(gsdErr.command).toBe('verify.path-exists');
+        expect(gsdErr.args).toEqual([]);
+        expect(gsdErr.stderr).toBe('');
+        expect(typeof gsdErr.exitCode === 'number').toBe(true);
+      }
+    });
   });
 
   // ─── Typed method tests ────────────────────────────────────────────────
@@ -170,9 +235,9 @@ describe('GSDTools', () => {
         'state-load.cjs',
         `
         const args = process.argv.slice(2);
-        // Script receives: state load --raw
-        if (args[0] === 'state' && args[1] === 'load' && args.includes('--raw')) {
-          process.stdout.write('phase=3\\nstatus=executing');
+        // Script receives: state load (no --raw when policy is json)
+        if (args[0] === 'state' && args[1] === 'load') {
+          process.stdout.write(JSON.stringify({ phase: '3', status: 'executing' }));
         } else {
           process.stderr.write('unexpected args: ' + args.join(' '));
           process.exit(1);
@@ -180,10 +245,10 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.stateLoad();
 
-      expect(result).toBe('phase=3\nstatus=executing');
+      expect(result).toEqual({ phase: '3', status: 'executing' });
     });
 
     it('commit() passes message and optional files', async () => {
@@ -196,7 +261,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.commit('test message', ['file1.md', 'file2.md']);
 
       expect(result).toBe('f89ae07');
@@ -215,7 +280,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.roadmapAnalyze();
 
       expect(result).toEqual({ phases: [] });
@@ -234,7 +299,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.verifySummary('/path/to/SUMMARY.md');
 
       expect(result).toBe('passed');
@@ -257,7 +322,7 @@ describe('GSDTools', () => {
         `process.stdout.write(${JSON.stringify(largeJson)});`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.exec('state', ['load']);
 
       expect(Array.isArray(result)).toBe(true);
@@ -302,7 +367,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.initNewProject();
 
       expect(result.researcher_model).toBe('claude-sonnet-4-6');
@@ -318,7 +383,7 @@ describe('GSDTools', () => {
         `process.stderr.write('init failed\\n'); process.exit(1);`,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
 
       await expect(tools.initNewProject()).rejects.toThrow(GSDToolsError);
     });
@@ -327,13 +392,17 @@ describe('GSDTools', () => {
   // ─── resolveGsdToolsPath() tests ────────────────────────────────────────
 
   describe('resolveGsdToolsPath()', () => {
-    it('returns repo-local path when it exists', async () => {
+    it('prefers bundled gsd-tools over project .claude when the bundled file exists', async () => {
       const localBinDir = join(tmpDir, '.claude', 'get-shit-done', 'bin');
       await mkdir(localBinDir, { recursive: true });
       await writeFile(join(localBinDir, 'gsd-tools.cjs'), '// stub');
 
       const result = resolveGsdToolsPath(tmpDir);
-      expect(result).toBe(join(localBinDir, 'gsd-tools.cjs'));
+      if (existsSync(BUNDLED_GSD_TOOLS_PATH)) {
+        expect(result).toBe(BUNDLED_GSD_TOOLS_PATH);
+      } else {
+        expect(result).toBe(join(localBinDir, 'gsd-tools.cjs'));
+      }
     });
 
     it('falls back to bundled repo path when repo-local does not exist', () => {
@@ -345,7 +414,7 @@ describe('GSDTools', () => {
       expect(result).toBe(expected);
     });
 
-    it('constructor uses repo-local path when available', async () => {
+    it('uses explicit gsdToolsPath when provided (overrides bundled / .claude resolution)', async () => {
       const localBinDir = join(tmpDir, '.claude', 'get-shit-done', 'bin');
       await mkdir(localBinDir, { recursive: true });
       const scriptPath = join(localBinDir, 'gsd-tools.cjs');
@@ -355,8 +424,7 @@ describe('GSDTools', () => {
         { mode: 0o755 },
       );
 
-      // No explicit gsdToolsPath — should auto-resolve to local
-      const tools = new GSDTools({ projectDir: tmpDir });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.exec('test', []);
       expect(result).toEqual({ source: 'local' });
     });
@@ -379,7 +447,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.configSet('workflow.auto_advance', 'true');
 
       expect(result).toBe('workflow.auto_advance=true');
@@ -395,7 +463,7 @@ describe('GSDTools', () => {
         `,
       );
 
-      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath });
+      const tools = new GSDTools({ projectDir: tmpDir, gsdToolsPath: scriptPath, preferNativeQuery: false });
       const result = await tools.configSet('mode', 'yolo');
 
       expect(result).toBe('mode=yolo');

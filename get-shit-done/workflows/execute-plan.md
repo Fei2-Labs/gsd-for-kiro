@@ -9,6 +9,16 @@ Read config.json for planning behavior settings.
 @~/.claude/get-shit-done/references/git-integration.md
 </required_reading>
 
+<atomic_close_out_invariant>
+For each executed plan, the only complete close-out order is:
+`production-code commit(s) -> SUMMARY commit -> STATE/ROADMAP update`.
+
+The only legal half-state is mid-production-commits while the executor is still
+actively working. Once production commits for a plan exist, returning without a
+committed SUMMARY.md is an illegal partial-plan state. The next execute-phase
+resume must detect that condition before dispatching another executor.
+</atomic_close_out_invariant>
+
 <available_agent_types>
 Valid GSD subagent types (use exact names — do not fall back to 'general-purpose'):
 - gsd-executor — Executes plan tasks, commits, creates SUMMARY.md
@@ -20,7 +30,7 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 Load execution context (paths only to minimize orchestrator context):
 
 ```bash
-INIT=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" init execute-phase "${PHASE}")
+INIT=$(gsd-sdk query init.execute-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
@@ -40,7 +50,7 @@ Find first PLAN without matching SUMMARY. Decimal phases supported (`01.1-hotfix
 
 ```bash
 PHASE=$(echo "$PLAN_PATH" | grep -oE '[0-9]+(\.[0-9]+)?-[0-9]+')
-# config settings can be fetched via gsd-tools config-get if needed
+# config settings can be fetched via gsd-sdk query config-get if needed
 ```
 
 <if mode="yolo">
@@ -63,7 +73,7 @@ PLAN_START_EPOCH=$(date +%s)
 ```bash
 # Count tasks — match <task tag at any indentation level
 TASK_COUNT=$(grep -cE '^\s*<task[[:space:]>]' .planning/phases/XX-name/{phase}-{plan}-PLAN.md 2>/dev/null || echo "0")
-INLINE_THRESHOLD=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.inline_plan_threshold --default 2 2>/dev/null || echo "2")
+INLINE_THRESHOLD=$(gsd-sdk query config-get workflow.inline_plan_threshold 2>/dev/null || echo "2")
 grep -n "type=\"checkpoint" .planning/phases/XX-name/{phase}-{plan}-PLAN.md
 ```
 
@@ -81,7 +91,7 @@ Otherwise: Apply checkpoint-based routing below.
 | Verify-only | B (segmented) | Segments between checkpoints. After none/human-verify → SUBAGENT. After decision/human-action → MAIN |
 | Decision | C (main) | Execute entirely in main context |
 
-**Pattern A:** init_agent_tracking → capture `EXPECTED_BASE=$(git rev-parse HEAD)` → spawn Task(subagent_type="gsd-executor", model=executor_model) with prompt: execute plan at [path], autonomous, all tasks + SUMMARY + commit, follow deviation/auth rules, report: plan name, tasks, SUMMARY path, commit hash → track agent_id → wait → update tracking → report. **Include `isolation="worktree"` only if `workflow.use_worktrees` is not `false`** (read via `config-get workflow.use_worktrees`). **When using `isolation="worktree"`, include a `<worktree_branch_check>` block in the prompt** instructing the executor to run `git merge-base HEAD {EXPECTED_BASE}` and, if the result differs from `{EXPECTED_BASE}`, hard-reset the branch with `git reset --hard {EXPECTED_BASE}` before starting work (safe — runs before any agent work), then verify with `[ "$(git rev-parse HEAD)" != "{EXPECTED_BASE}" ] && exit 1`. This corrects a known issue where `EnterWorktree` creates branches from `main` instead of the feature branch HEAD (affects all platforms).
+**Pattern A:** init_agent_tracking → capture `EXPECTED_BASE=$(git rev-parse HEAD)` → spawn Agent(subagent_type="gsd-executor", model=executor_model) with prompt: execute plan at [path], autonomous, all tasks + SUMMARY + commit, follow deviation/auth rules, report: plan name, tasks, SUMMARY path, commit hash → track agent_id → wait → update tracking → report. **Include `isolation="worktree"` only if `workflow.use_worktrees` is not `false`** (read via `config-get workflow.use_worktrees`). **When using `isolation="worktree"`, include a `<worktree_branch_check>` block in the prompt** instructing the executor to: (1) FIRST assert `git symbolic-ref HEAD` resolves to a per-agent branch (NOT a protected ref like `main`/`master`/`develop`/`trunk`/`release/*`) and HALT with a blocker if not — never self-recover via `git update-ref refs/heads/<protected>` (#2924); (2) only after that assertion passes, run `git merge-base HEAD {EXPECTED_BASE}` and, if the result differs from `{EXPECTED_BASE}`, hard-reset the branch with `git reset --hard {EXPECTED_BASE}` before starting work, then verify with `[ "$(git rev-parse HEAD)" != "{EXPECTED_BASE}" ] && exit 1`. The HEAD assertion (Step 1) MUST run before any reset/checkout. This corrects a known issue where `EnterWorktree` creates branches from `main` instead of the feature branch HEAD (affects all platforms — #2015) and prevents the destructive HEAD-on-master self-recovery path (#2924).
 
 **Pattern B:** Execute segment-by-segment. Autonomous segments: spawn subagent for assigned tasks only (no SUMMARY/commit). Checkpoints: main context. After all segments: aggregate, create SUMMARY, commit. See segment_execution.
 
@@ -116,12 +126,18 @@ Pattern B only (verify-only checkpoints). Skip for A/C.
 2. Per segment:
    - Subagent route: spawn gsd-executor for assigned tasks only. Prompt: task range, plan path, read full plan for context, execute assigned tasks, track deviations, NO SUMMARY/commit. Track via agent protocol.
    - Main route: execute tasks using standard flow (step name="execute")
-3. After ALL segments: aggregate files/deviations/decisions → create SUMMARY.md → commit → self-check:
+3. **Critical ordering — write and commit SUMMARY.md as one atomic block.** Do NOT
+   emit narrative output between the Write tool call and the commit tool call.
+   Truncation at this boundary is a known failure mode (see #2070 rescue logic in
+   execute-phase.md step 5.5).
+
+   After ALL segments: aggregate files/deviations/decisions → create SUMMARY.md → self-check:
    - Verify key-files.created exist on disk with `[ -f ]`
    - Check `git log --oneline --all --grep="{phase}-{plan}"` returns ≥1 commit
    - Re-run ALL `<acceptance_criteria>` from every task — if any fail, fix before finalizing SUMMARY
    - Re-run the plan-level `<verification>` commands — log results in SUMMARY
    - Append `## Self-Check: PASSED` or `## Self-Check: FAILED` to SUMMARY
+   Then commit (no narrative between Write and commit).
 
    **Known Claude Code bug (classifyHandoffIfNeeded):** If any segment agent reports "failed" with `classifyHandoffIfNeeded is not defined`, this is a Claude Code runtime bug — not a real failure. Run spot-checks; if they pass, treat as successful.
 
@@ -141,7 +157,7 @@ This IS the execution instructions. Follow exactly. If plan references CONTEXT.m
 
 <step name="previous_phase_check">
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" phases list --type summaries --raw
+gsd-sdk query phases.list --type summaries --raw
 # Extract the second-to-last summary from the JSON result
 ```
 
@@ -239,7 +255,12 @@ See `~/.claude/get-shit-done/references/tdd.md` for structure.
 Your commits may trigger pre-commit hooks. Auto-fix hooks handle themselves transparently — files get fixed and re-staged automatically.
 
 **If running as a parallel executor agent (spawned by execute-phase):**
-Use `--no-verify` on all commits. Pre-commit hooks cause build lock contention when multiple agents commit simultaneously (e.g., cargo lock fights in Rust projects). The orchestrator validates once after all agents complete.
+Run commits normally — let pre-commit hooks run. Do NOT use `--no-verify` by default
+(#2924). Hooks should run so issues surface at the introducing commit, and silent
+bypass violates project CLAUDE.md guidance. If a project explicitly opts out via
+`workflow.worktree_skip_hooks=true`, the orchestrator will surface that flag in the
+prompt; absent that signal, hooks run normally. If a hook fails, follow the
+sequential-mode handling below.
 
 **If running as the sole executor (sequential mode):**
 If a commit is BLOCKED by a hook:
@@ -255,13 +276,9 @@ If a commit is BLOCKED by a hook:
 <task_commit>
 ## Task Commit Protocol
 
-Follow the task commit protocol from the gsd-executor agent definition (single source of truth):
-- Stage files individually (NEVER `git add .` or `git add -A`)
-- Format: `{type}({phase}-{plan}): {concise description}` with bullet points for key changes
-- Types: feat, fix, test, refactor, perf, docs, style, chore
-- Sub-repos: use `commit-to-subrepo` when `sub_repos` is configured
-- Record commit hash for SUMMARY tracking
-- Check for untracked generated files after each commit
+Canonical per-task commit rules live in **`agents/gsd-executor.md`** (`<task_commit_protocol>`). Follow that section for staging, `{type}({phase}-{plan})` messages, `commit-to-subrepo` when `sub_repos` is set, post-commit checks, and untracked-file handling — do not duplicate or paraphrase the full protocol here (single source of truth).
+
+**Orchestrator note:** After each task, the spawned executor reports commit hashes; this workflow does not re-specify commit semantics beyond pointing at the executor.
 
 </task_commit>
 
@@ -294,7 +311,7 @@ If verification fails:
 
 **Check if node repair is enabled** (default: on):
 ```bash
-NODE_REPAIR=$(node "./.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.node_repair 2>/dev/null || echo "true")
+NODE_REPAIR=$(gsd-sdk query config-get workflow.node_repair 2>/dev/null || echo "true")
 ```
 
 If `NODE_REPAIR` is `true`: invoke `@./.claude/get-shit-done/workflows/node-repair.md` with:
@@ -335,6 +352,11 @@ If user_setup exists: create `{phase}-USER-SETUP.md` using template `~/.claude/g
 </step>
 
 <step name="create_summary">
+**Critical ordering — write and commit SUMMARY.md as one atomic block.** Do NOT
+emit narrative output between the Write tool call and the commit tool call.
+Truncation at this boundary is a known failure mode (see #2070 rescue logic in
+execute-phase.md step 5.5).
+
 Create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`. Use `~/.claude/get-shit-done/templates/summary.md`.
 
 **Frontmatter:** phase, plan, subsystem, tags | requires/provides/affects | tech-stack.added/patterns | key-files.created/modified | key-decisions | requirements-completed (**MUST** copy `requirements` array from PLAN.md frontmatter verbatim) | duration ($DURATION), completed ($PLAN_END_TIME date).
@@ -353,7 +375,7 @@ Next: more plans → "Ready for {next-plan}" | last → "Phase complete, ready f
 handles STATE.md/ROADMAP.md updates centrally after merging worktrees to avoid
 merge conflicts).
 
-Update STATE.md using gsd-tools:
+Update STATE.md using gsd-sdk query (or legacy gsd-tools) state mutations:
 
 ```bash
 # Auto-detect parallel mode: .git is a file in worktrees, a directory in main repo
@@ -362,13 +384,13 @@ IS_WORKTREE=$([ -f .git ] && echo "true" || echo "false")
 # Skip in parallel mode — orchestrator handles STATE.md centrally
 if [ "$IS_WORKTREE" != "true" ]; then
   # Advance plan counter (handles last-plan edge case)
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state advance-plan
+  gsd-sdk query state.advance-plan
 
   # Recalculate progress bar from disk state
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state update-progress
+  gsd-sdk query state.update-progress
 
   # Record execution metrics
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state record-metric \
+  gsd-sdk query state.record-metric \
     --phase "${PHASE}" --plan "${PLAN}" --duration "${DURATION}" \
     --tasks "${TASK_COUNT}" --files "${FILE_COUNT}"
 fi
@@ -381,19 +403,19 @@ From SUMMARY: Extract decisions and add to STATE.md:
 ```bash
 # Add each decision from SUMMARY key-decisions
 # Prefer file inputs for shell-safe text (preserves `$`, `*`, etc. exactly)
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state add-decision \
+gsd-sdk query state.add-decision \
   --phase "${PHASE}" --summary-file "${DECISION_TEXT_FILE}" --rationale-file "${RATIONALE_FILE}"
 
 # Add blockers if any found
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state add-blocker --text-file "${BLOCKER_TEXT_FILE}"
+gsd-sdk query state.add-blocker --text-file "${BLOCKER_TEXT_FILE}"
 ```
 </step>
 
 <step name="update_session_continuity">
-Update session info using gsd-tools:
+Update session info using gsd-sdk query (or legacy gsd-tools):
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state record-session \
+gsd-sdk query state.record-session \
   --stopped-at "Completed ${PHASE}-${PLAN}-PLAN.md" \
   --resume-file "None"
 ```
@@ -406,16 +428,20 @@ If SUMMARY "Issues Encountered" ≠ "None": yolo → log and continue. Interacti
 </step>
 
 <step name="update_roadmap">
-**Skip this step if running in parallel mode** (the orchestrator handles ROADMAP.md
-updates centrally after merging worktrees).
+Run this step only when NOT executing inside a git worktree (i.e.
+`use_worktrees: false`, the bug #2661 reproducer). In worktree mode each
+worktree has its own ROADMAP.md, so per-plan writes here would diverge
+across siblings; the orchestrator owns the post-merge sync centrally
+(see execute-phase.md §5.7, single-writer contract from #1486 / dcb50396).
 
 ```bash
-# Auto-detect parallel mode: .git is a file in worktrees, a directory in main repo
+# Auto-detect worktree mode: .git is a file in worktrees, a directory in main repo.
+# This mirrors the use_worktrees config flag for the executing handler.
 IS_WORKTREE=$([ -f .git ] && echo "true" || echo "false")
 
-# Skip in parallel mode — orchestrator handles ROADMAP.md centrally
 if [ "$IS_WORKTREE" != "true" ]; then
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" roadmap update-plan-progress "${PHASE}"
+  # use_worktrees: false → this handler is the sole post-plan sync point (#2661)
+  gsd-sdk query roadmap.update-plan-progress "${PHASE}"
 fi
 ```
 Counts PLAN vs SUMMARY files on disk. Updates progress table row with correct count and status (`In Progress` or `Complete` with date).
@@ -425,13 +451,18 @@ Counts PLAN vs SUMMARY files on disk. Updates progress table row with correct co
 Mark completed requirements from the PLAN.md frontmatter `requirements:` field:
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" requirements mark-complete ${REQ_IDS}
+gsd-sdk query requirements.mark-complete ${REQ_IDS}
 ```
 
 Extract requirement IDs from the plan's frontmatter (e.g., `requirements: [AUTH-01, AUTH-02]`). If no requirements field, skip.
 </step>
 
 <step name="git_commit_metadata">
+**Critical ordering — write and commit SUMMARY.md as one atomic block.** Do NOT
+emit narrative output between the Write tool call and the commit tool call.
+Truncation at this boundary is a known failure mode (see #2070 rescue logic in
+execute-phase.md step 5.5).
+
 Task code already committed per-task. Commit plan metadata:
 
 ```bash
@@ -440,9 +471,9 @@ IS_WORKTREE=$([ -f .git ] && echo "true" || echo "false")
 
 # In parallel mode: exclude STATE.md and ROADMAP.md (orchestrator commits these)
 if [ "$IS_WORKTREE" = "true" ]; then
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/REQUIREMENTS.md
+  gsd-sdk query commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/REQUIREMENTS.md
 else
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
+  gsd-sdk query commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
 fi
 ```
 </step>
@@ -458,7 +489,7 @@ git diff --name-only ${FIRST_TASK}^..HEAD 2>/dev/null || true
 Update only structural changes: new src/ dir → STRUCTURE.md | deps → STACK.md | file pattern → CONVENTIONS.md | API client → INTEGRATIONS.md | config → STACK.md | renamed → update paths. Skip code-only/bugfix/content changes.
 
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "" --files .planning/codebase/*.md --amend
+gsd-sdk query commit "" --files .planning/codebase/*.md --amend
 ```
 </step>
 
@@ -472,9 +503,9 @@ If `USER_SETUP_CREATED=true`: display `⚠️ USER SETUP REQUIRED` with path + e
 
 | Condition | Route | Action |
 |-----------|-------|--------|
-| summaries < plans | **A: More plans** | Find next PLAN without SUMMARY. Yolo: auto-continue. Interactive: show next plan, suggest `/gsd-execute-phase {phase}` + `/gsd-verify-work`. STOP here. |
-| summaries = plans, current < highest phase | **B: Phase done** | Show completion, suggest `/gsd-plan-phase {Z+1}` + `/gsd-verify-work {Z}` + `/gsd-discuss-phase {Z+1}` |
-| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd-complete-milestone` + `/gsd-verify-work` + `/gsd-add-phase` |
+| summaries < plans | **A: More plans** | Find next PLAN without SUMMARY. Yolo: auto-continue. Interactive: show next plan, suggest `/gsd:execute-phase {phase}` + `/gsd:verify-work`. STOP here. |
+| summaries = plans, current < highest phase | **B: Phase done** | Show completion, suggest `/gsd:plan-phase {Z+1}` + `/gsd:verify-work {Z}` + `/gsd:discuss-phase {Z+1}` |
+| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd:complete-milestone` + `/gsd:verify-work` + `/gsd-add-phase` |
 
 All routes: `/clear` first for fresh context.
 </step>

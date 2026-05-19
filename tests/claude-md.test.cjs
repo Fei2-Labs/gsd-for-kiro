@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * CLAUDE.md generation and new-project workflow tests
  */
@@ -36,9 +40,14 @@ describe('generate-claude-md', () => {
     const claudePath = path.join(tmpDir, 'CLAUDE.md');
     const content = fs.readFileSync(claudePath, 'utf-8');
     assert.ok(content.includes('## GSD Workflow Enforcement'));
+    // #3584: generated CLAUDE.md must emit the runtime-routable hyphen-form
+    // (Claude/Cursor/OpenCode/Kilo etc.); the legacy colon form is no longer
+    // dispatched by current skill installs.
     assert.ok(content.includes('/gsd-quick'));
     assert.ok(content.includes('/gsd-debug'));
     assert.ok(content.includes('/gsd-execute-phase'));
+    assert.ok(!content.includes('/gsd:quick'));
+    assert.ok(!content.includes('/gsd:execute-phase'));
     assert.ok(content.includes('Do not make direct repo edits outside a GSD workflow'));
   });
 
@@ -69,7 +78,10 @@ describe('new-project workflow includes CLAUDE.md generation', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(content.includes('generate-claude-md'));
     // Codex fix: workflow now uses $INSTRUCTION_FILE (AGENTS.md for Codex, CLAUDE.md otherwise)
-    assert.ok(content.includes('--files .planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md "$INSTRUCTION_FILE"'));
+    assert.ok(
+      content.includes('.planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md "$INSTRUCTION_FILE"'),
+      'final roadmap commit should stage ROADMAP, STATE, REQUIREMENTS, and instruction file'
+    );
   });
 
   test('new-project artifacts reference instruction file variable', () => {

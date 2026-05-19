@@ -1,7 +1,7 @@
 /**
  * Unit tests for phase lifecycle handlers.
  *
- * Tests phaseAdd, phaseInsert, phaseScaffold, replaceInCurrentMilestone,
+ * Tests phaseAdd, phaseAddBatch, phaseInsert, phaseScaffold, replaceInCurrentMilestone,
  * and readModifyWriteRoadmapMd.
  */
 
@@ -150,6 +150,120 @@ describe('replaceInCurrentMilestone', () => {
     expect(before).toContain('3 plans'); // old milestone untouched
     expect(after).toContain('4 plans'); // current milestone updated
   });
+
+  it('replaces only in current milestone when older milestones are wrapped in <details>', async () => {
+    const { replaceInCurrentMilestone } = await import('./phase-lifecycle.js');
+    const content = [
+      '# Roadmap',
+      '',
+      '<details>',
+      '<summary>✅ v1.18 (shipped)</summary>',
+      '',
+      '### Phase 1: Old Phase',
+      '',
+      '- [ ] Phase 1: Old Phase',
+      '',
+      '</details>',
+      '',
+      '<details>',
+      '<summary>✅ v1.19 (shipped)</summary>',
+      '',
+      '### Phase 2: Another Old Phase',
+      '',
+      '</details>',
+      '',
+      '## Current Milestone: v1.20',
+      '',
+      '- [ ] Phase 3: Current work',
+      '',
+      '### Phase 3: Current work',
+      '',
+      '**Plans:** 0/2 plans',
+      '',
+    ].join('\n');
+
+    const pattern = /\*\*Plans:\*\* [^\n]+/;
+    const result = replaceInCurrentMilestone(content, pattern, '**Plans:** 2/2 plans complete');
+
+    // Should update Phase 3's Plans line (current milestone)
+    expect(result).toContain('**Plans:** 2/2 plans complete');
+    // Should NOT touch v1.18 or v1.19 sections
+    expect(result).toContain('✅ v1.18');
+    expect(result).toContain('✅ v1.19');
+  });
+
+  it('replaces inside active milestone when it is wrapped in a <details> block', async () => {
+    const { replaceInCurrentMilestone } = await import('./phase-lifecycle.js');
+    // Scenario: active milestone is collapsed in <details> (e.g. user collapsed it)
+    const content = [
+      '# Roadmap',
+      '',
+      '<details>',
+      '<summary>✅ v1.18 (shipped)</summary>',
+      '',
+      '### Phase 1: Old Phase',
+      '',
+      '**Plans:** 1/1 plans',
+      '',
+      '</details>',
+      '',
+      '<details>',
+      '<summary>🚧 v1.19 in-progress</summary>',
+      '',
+      '### Phase 2: Current Work',
+      '',
+      '**Plans:** 1/2 plans',
+      '',
+      '</details>',
+      '',
+    ].join('\n');
+
+    const pattern = /\*\*Plans:\*\* [^\n]+/g;
+    const result = replaceInCurrentMilestone(content, pattern, '**Plans:** 2/2 plans complete');
+
+    // The replacement should happen somewhere in the content (not silently dropped)
+    expect(result).toContain('**Plans:** 2/2 plans complete');
+    // v1.18 old plans line should remain untouched
+    expect(result).toContain('**Plans:** 1/1 plans');
+  });
+
+  it('replaces inside active <details> even when footer text exists after </details>', async () => {
+    const { replaceInCurrentMilestone } = await import('./phase-lifecycle.js');
+    // Scenario: active milestone is the last <details> block, but a footer
+    // (e.g. "---\n*Last updated*") follows it. The fast-path sees after.trim()
+    // non-empty and replaces in the footer instead of inside the active block.
+    const content = [
+      '# Roadmap',
+      '',
+      '<details>',
+      '<summary>v1.0 (Archived)</summary>',
+      '',
+      '**Plans:** 1/1 plans',
+      '',
+      '</details>',
+      '',
+      '<details>',
+      '<summary>v2.0 (Active)</summary>',
+      '',
+      '**Plans:** 1/2 plans',
+      '',
+      '</details>',
+      '',
+      '---',
+      '*Last updated: 2026-01-01*',
+    ].join('\n');
+
+    const pattern = /\*\*Plans:\*\* [^\n]+/g;
+    const result = replaceInCurrentMilestone(content, pattern, '**Plans:** 2/2 plans complete');
+
+    // Active milestone inside last <details> should be updated
+    expect(result).toContain('**Plans:** 2/2 plans complete');
+    // Archived milestone should remain untouched
+    expect(result).toContain('**Plans:** 1/1 plans');
+    // Footer should be preserved verbatim
+    expect(result).toContain('---');
+    expect(result).toContain('*Last updated: 2026-01-01*');
+  });
 });
 
 // ─── readModifyWriteRoadmapMd ───────────────────────────────────────────
@@ -244,6 +358,285 @@ describe('phaseAdd', () => {
     const sepIdx = roadmap.lastIndexOf('\n---');
     expect(phaseIdx).toBeLessThan(sepIdx);
     expect(phaseIdx).toBeGreaterThan(0);
+  });
+
+  it('detects max phase from bullet checklist format (regression #2726)', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Current Milestone: v5.0',
+      '',
+      '- [x] Phase 76: Data Import',
+      '- [x] Phase 77: Data Transform',
+      '- [ ] Phase 88: Final Cleanup',
+      '',
+    ].join('\n');
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state: MINIMAL_STATE,
+      phases: [],
+    });
+
+    const result = await phaseAdd(['new-feature'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    expect(data.phase_number).toBe(89);
+    expect(data.padded).toBe('89');
+  });
+
+  it('detects max phase from bold inline format (regression #2726)', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Current Milestone: v5.0',
+      '',
+      '**Phase 50: Core Infrastructure**',
+      '**Phase 51: API Layer**',
+      '',
+    ].join('\n');
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state: MINIMAL_STATE,
+      phases: [],
+    });
+
+    const result = await phaseAdd(['new-feature'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    expect(data.phase_number).toBe(52);
+  });
+
+  it('falls back to filesystem scan when no phase matches in ROADMAP (regression #2726)', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+
+    // ROADMAP with no recognizable phase entries
+    const roadmap = '# Roadmap\n\n## Current Milestone: v5.0\n\nSome content without phases\n';
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state: MINIMAL_STATE,
+      phases: ['45-legacy-phase', '46-another-phase'],
+    });
+
+    const result = await phaseAdd(['new-feature'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    // Should detect phases 45 and 46 on disk, so new phase = 47
+    expect(data.phase_number).toBe(47);
+  });
+
+  it('filesystem fallback handles project-code-prefixed phase directories (regression coderabbit)', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+
+    const roadmap = '# Roadmap\n\n## Current Milestone: v5.0\n\nSome content\n';
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state: MINIMAL_STATE,
+      phases: [],
+    });
+
+    // Create prefixed directories manually (project_code = "CK" scenario)
+    const phasesDir = join(tmpDir, '.planning', 'phases');
+    await mkdir(join(phasesDir, 'CK-45-legacy-phase'), { recursive: true });
+    await mkdir(join(phasesDir, 'CK-46-another-phase'), { recursive: true });
+
+    const result = await phaseAdd(['new-feature'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    // Should detect CK-45 and CK-46, so new phase = 47
+    expect(data.phase_number).toBe(47);
+  });
+
+  // ── Symptom A: --dry-run flag (#3226) ─────────────────────────────────
+
+  it('--dry-run returns JSON result without creating any files or modifying ROADMAP', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, {
+      phases: ['09-foundation', '10-read-only-queries'],
+    });
+
+    const roadmapBefore = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = await phaseAdd(['Dry Run Phase', '--dry-run'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    // Result must include the computed fields
+    expect(data.phase_number).toBe(11);
+    expect(data.padded).toBe('11');
+    expect(data.name).toBe('Dry Run Phase');
+    expect(data.slug).toBe('dry-run-phase');
+    expect(data.dry_run).toBe(true);
+    expect(typeof data.roadmap_entry).toBe('string');
+    expect((data.roadmap_entry as string)).toContain('### Phase 11: Dry Run Phase');
+
+    // ROADMAP.md must be unchanged
+    const roadmapAfter = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    expect(roadmapAfter).toBe(roadmapBefore);
+
+    // No new phase directory must have been created
+    const phasesDir = join(tmpDir, '.planning', 'phases');
+    const entries = await readdir(phasesDir, { withFileTypes: true });
+    const newDir = entries.find(e => e.isDirectory() && e.name.includes('11-dry-run-phase'));
+    expect(newDir).toBeUndefined();
+  });
+
+  it('--dry-run works when flag appears after customId position', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, {
+      phases: ['09-foundation', '10-read-only-queries'],
+    });
+
+    const roadmapBefore = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    // description + --dry-run — no customId; flag must not be mistaken for customId
+    const result = await phaseAdd(['My Feature', '--dry-run'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    expect(data.dry_run).toBe(true);
+    expect(data.phase_number).toBe(11);
+
+    // ROADMAP must still be untouched
+    const roadmapAfter = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    expect(roadmapAfter).toBe(roadmapBefore);
+  });
+
+  // ── Symptom C: unknown flag rejection (#3226) ──────────────────────────
+
+  it('rejects unknown --flags with a validation error naming the flag', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir);
+
+    await expect(phaseAdd(['My Feature', '--bogus-flag'], tmpDir)).rejects.toThrow('--bogus-flag');
+  });
+
+  it('rejects any unknown --flag even when mixed with dry-run', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir);
+
+    await expect(phaseAdd(['Desc', '--dry-run', '--unknown'], tmpDir)).rejects.toThrow('--unknown');
+  });
+
+  // ── Symptom B: ROADMAP heading scan counts ### Phase N: (#3226 verify) ─
+
+  it('scans ### Phase N: headings in ROADMAP when no on-disk dirs exist (B already fixed)', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Current Milestone: v5.0',
+      '',
+      '### Phase 5: Foundation',
+      '',
+      '**Goal:** Build foundation',
+      '**Plans:** 0 plans',
+      '',
+    ].join('\n');
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state: MINIMAL_STATE,
+      phases: [], // no on-disk dirs — must rely on ROADMAP scan
+    });
+
+    const result = await phaseAdd(['Next Phase'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+
+    // Must detect Phase 5 from ### heading → next = 6, not 1
+    expect(data.phase_number).toBe(6);
+  });
+
+  // ── Concurrent phase.add: no duplicate IDs (CR finding) ────────────────
+  it('concurrent phase.add calls produce distinct sequential phase numbers', async () => {
+    const { phaseAdd } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, {
+      phases: ['09-foundation', '10-read-only-queries'],
+    });
+
+    // Fire two phase.add calls simultaneously. If computation happens outside
+    // the lock both will observe maxPhase=10 and claim newPhaseId=11 — collision.
+    const [r1, r2] = await Promise.all([
+      phaseAdd(['Concurrent Alpha'], tmpDir),
+      phaseAdd(['Concurrent Beta'], tmpDir),
+    ]);
+
+    const n1 = (r1.data as Record<string, unknown>).phase_number as number;
+    const n2 = (r2.data as Record<string, unknown>).phase_number as number;
+
+    // Both must succeed and produce DIFFERENT numbers
+    expect(n1).not.toBe(n2);
+
+    // The pair must be {11, 12} — no gaps, no duplicates
+    const sorted = [n1, n2].sort((a, b) => a - b);
+    expect(sorted).toEqual([11, 12]);
+
+    // ROADMAP.md must contain exactly one entry for each phase
+    const roadmap = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const phase11Count = (roadmap.match(/### Phase 11:/g) || []).length;
+    const phase12Count = (roadmap.match(/### Phase 12:/g) || []).length;
+    expect(phase11Count).toBe(1);
+    expect(phase12Count).toBe(1);
+
+    // Both phase directories must exist on disk
+    const phasesDir = join(tmpDir, '.planning', 'phases');
+    const entries = await readdir(phasesDir, { withFileTypes: true });
+    const dirs = entries.filter(e => e.isDirectory()).map(e => e.name);
+    const has11 = dirs.some(d => d.startsWith('11-'));
+    const has12 = dirs.some(d => d.startsWith('12-'));
+    expect(has11).toBe(true);
+    expect(has12).toBe(true);
+  });
+});
+
+// ─── phaseAddBatch ─────────────────────────────────────────────────────
+
+describe('phaseAddBatch', () => {
+  it('adds multiple sequential phases in one pass', async () => {
+    const { phaseAddBatch } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, {
+      phases: ['09-foundation', '10-read-only-queries'],
+    });
+
+    const result = await phaseAddBatch(['Alpha', 'Beta'], tmpDir);
+    const data = result.data as { phases: Array<Record<string, unknown>>; count: number };
+
+    expect(data.count).toBe(2);
+    expect(data.phases[0].phase_number).toBe(11);
+    expect(data.phases[0].name).toBe('Alpha');
+    expect(data.phases[1].phase_number).toBe(12);
+    expect(data.phases[1].name).toBe('Beta');
+
+    const roadmap = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    expect(roadmap).toContain('### Phase 11: Alpha');
+    expect(roadmap).toContain('### Phase 12: Beta');
+
+    const phasesDir = join(tmpDir, '.planning', 'phases');
+    expect(existsSync(join(phasesDir, '11-alpha', '.gitkeep'))).toBe(true);
+    expect(existsSync(join(phasesDir, '12-beta', '.gitkeep'))).toBe(true);
+  });
+
+  it('accepts --descriptions JSON array', async () => {
+    const { phaseAddBatch } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, { phases: ['09-foundation', '10-read-only-queries'] });
+
+    const result = await phaseAddBatch(
+      ['--descriptions', JSON.stringify(['One', 'Two'])],
+      tmpDir,
+    );
+    const data = result.data as { count: number };
+    expect(data.count).toBe(2);
+  });
+
+  it('throws when no descriptions', async () => {
+    const { phaseAddBatch } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir);
+
+    await expect(phaseAddBatch([], tmpDir)).rejects.toThrow('descriptions array required');
   });
 });
 
@@ -579,6 +972,22 @@ describe('phaseRemove', () => {
     expect(data.directory_deleted).toBeTruthy();
   });
 
+  it('bug-3409: accepts --force before phase id', async () => {
+    const { phaseRemove } = await import('./phase-lifecycle.js');
+    const phasesDir = join(tmpDir, '.planning', 'phases');
+    await setupTestProject(tmpDir, {
+      roadmap: ROADMAP_FOR_REMOVE,
+      state: STATE_FOR_REMOVE,
+      phases: ['05-auth', '06-dashboard', '07-api'],
+    });
+    await writeFile(join(phasesDir, '06-dashboard', '06-01-SUMMARY.md'), 'summary', 'utf-8');
+
+    const result = await phaseRemove(['--force', '6'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.removed).toBe('6');
+    expect(data.directory_deleted).toBeTruthy();
+  });
+
   it('throws GSDError when ROADMAP.md is missing', async () => {
     const { phaseRemove } = await import('./phase-lifecycle.js');
     // Set up without ROADMAP.md
@@ -599,6 +1008,19 @@ describe('phaseRemove', () => {
     });
 
     await expect(phaseRemove([], tmpDir)).rejects.toThrow('phase number required');
+  });
+
+  it('throws GSDError when target phase does not exist and does not mutate STATE.md', async () => {
+    const { phaseRemove } = await import('./phase-lifecycle.js');
+    await setupTestProject(tmpDir, {
+      roadmap: ROADMAP_FOR_REMOVE,
+      state: STATE_FOR_REMOVE,
+      phases: ['05-auth', '06-dashboard', '07-api'],
+    });
+
+    await expect(phaseRemove(['99'], tmpDir)).rejects.toThrow('Phase 99 not found');
+    const stateContent = await readFile(join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    expect(stateContent).toMatch(/total_phases:\s*7/);
   });
 
   it('updates ROADMAP.md by removing phase section and renumbering', async () => {
@@ -968,6 +1390,74 @@ describe('phaseComplete', () => {
     // By Phase table should have a row for phase 10
     expect(state).toMatch(/\|\s*10\s*\|\s*3\s*\|/);
   });
+
+  it('does not overwrite plan checkbox when **Plans:** is on its own line (regression #2728)', async () => {
+    const { phaseComplete } = await import('./phase-lifecycle.js');
+
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Current Milestone: v3.0',
+      '',
+      '- [ ] Phase 7: marketing-landing-v2',
+      '',
+      '### Phase 7: marketing-landing-v2',
+      '',
+      '**Goal:** Landing page',
+      '**Plans:**',
+      '- [x] 07-01-cherry-pick-foundation-PLAN.md — Wave 1',
+      '- [x] 07-02-routing-auth-seo-PLAN.md — Wave 2',
+      '',
+      '### Phase 8: p3-nice-to-haves',
+      '',
+      '**Goal:** Nice to haves',
+      '**Plans:** 3 plans',
+      '',
+    ].join('\n');
+
+    const state = [
+      '---',
+      'gsd_state_version: 1.0',
+      'milestone: v3.0',
+      'status: executing',
+      'progress:',
+      '  total_phases: 2',
+      '  completed_phases: 0',
+      '  total_plans: 4',
+      '  completed_plans: 2',
+      '  percent: 50',
+      '---',
+      '',
+      '# Project State',
+      '',
+      'Phase: 7 of 2 — EXECUTING',
+      'Status: Executing Phase 7',
+    ].join('\n');
+
+    await setupTestProject(tmpDir, {
+      roadmap,
+      state,
+      phases: ['07-marketing-landing-v2', '08-p3-nice-to-haves'],
+    });
+
+    const p7Dir = join(tmpDir, '.planning', 'phases', '07-marketing-landing-v2');
+    await writeFile(join(p7Dir, '07-01-PLAN.md'), 'plan1', 'utf-8');
+    await writeFile(join(p7Dir, '07-02-PLAN.md'), 'plan2', 'utf-8');
+    await writeFile(join(p7Dir, '07-01-SUMMARY.md'), 'summary1', 'utf-8');
+    await writeFile(join(p7Dir, '07-02-SUMMARY.md'), 'summary2', 'utf-8');
+
+    await phaseComplete(['7'], tmpDir);
+
+    const updated = await readFile(join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+
+    // The plan lines must NOT be replaced with "N/N plans complete"
+    expect(updated).toContain('07-01-cherry-pick-foundation-PLAN.md');
+    expect(updated).toContain('07-02-routing-auth-seo-PLAN.md');
+    expect(updated).not.toMatch(/^2\/2 plans complete/m);
+
+    // Phase 8's **Plans:** line must NOT be touched
+    expect(updated).toContain('**Plans:** 3 plans');
+  });
 });
 
 // ─── phasesClear ────────────────────────────────────────────────────────────
@@ -1044,6 +1534,68 @@ describe('phasesArchive', () => {
   });
 });
 
+// ─── milestoneComplete help-flag defense (#3259) ────────────────────────────
+
+describe('milestoneComplete help-flag defense', () => {
+  it('rejects --help as a version value with GSDError before any disk write', async () => {
+    const { milestoneComplete } = await import('./phase-lifecycle.js');
+    const { GSDError, ErrorClassification } = await import('../errors.js');
+    await setupTestProject(tmpDir);
+
+    // Capture pre-invocation filesystem state
+    const planningDir = join(tmpDir, '.planning');
+    const milestonesPath = join(planningDir, 'MILESTONES.md');
+    const statePath = join(planningDir, 'STATE.md');
+    const preStateStat = await import('node:fs').then((m) => m.statSync(statePath));
+    const milestonesExistedBefore = existsSync(milestonesPath);
+
+    let thrown: unknown;
+    try {
+      await milestoneComplete(['--help'], tmpDir);
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(GSDError);
+    const err = thrown as InstanceType<typeof GSDError>;
+    expect(err.classification).toBe(ErrorClassification.Validation);
+    expect(err.message).toContain('--help');
+
+    // Assert no files were written
+    const postStateStat = await import('node:fs').then((m) => m.statSync(statePath));
+    expect(postStateStat.mtimeMs).toBe(preStateStat.mtimeMs);
+    expect(existsSync(milestonesPath)).toBe(milestonesExistedBefore);
+  });
+
+  it('rejects -h as a version value with GSDError before any disk write', async () => {
+    const { milestoneComplete } = await import('./phase-lifecycle.js');
+    const { GSDError, ErrorClassification } = await import('../errors.js');
+    await setupTestProject(tmpDir);
+
+    const statePath = join(tmpDir, '.planning', 'STATE.md');
+    const preStateStat = await import('node:fs').then((m) => m.statSync(statePath));
+    const milestonesPath = join(tmpDir, '.planning', 'MILESTONES.md');
+    const milestonesExistedBefore = existsSync(milestonesPath);
+
+    let thrown: unknown;
+    try {
+      await milestoneComplete(['-h'], tmpDir);
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(GSDError);
+    const err = thrown as InstanceType<typeof GSDError>;
+    expect(err.classification).toBe(ErrorClassification.Validation);
+    expect(err.message).toContain('-h');
+
+    // Assert no files were written
+    const postStateStat = await import('node:fs').then((m) => m.statSync(statePath));
+    expect(postStateStat.mtimeMs).toBe(preStateStat.mtimeMs);
+    expect(existsSync(milestonesPath)).toBe(milestonesExistedBefore);
+  });
+});
+
 // ─── Registry integration ──────────────────────────────────────────────────
 
 describe('lifecycle handlers in registry', () => {
@@ -1075,5 +1627,124 @@ describe('lifecycle handlers in registry', () => {
       const handler = registry.getHandler(cmd);
       expect(handler, `${cmd} should be registered`).toBeDefined();
     }
+  });
+});
+
+// ─── CR-3267 regression: error-propagation in listDirectories ─────────────
+
+describe('listDirectories — CR-3267 finding 1: non-ENOENT errors propagate', () => {
+  it('propagates EACCES from readdir instead of returning []', async () => {
+    const { listDirectories } = await import('./phase-filesystem-adapter.js');
+    // Create a real directory then remove read permission
+    const dir = await mkdtemp(join(tmpdir(), 'gsd-fs-acl-'));
+    const inner = join(dir, 'phases');
+    await mkdir(inner);
+    try {
+      await import('node:fs/promises').then(m => m.chmod(inner, 0o000));
+      await expect(listDirectories(inner)).rejects.toThrow();
+    } finally {
+      // Restore so cleanup can delete
+      await import('node:fs/promises').then(m => m.chmod(inner, 0o755));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns [] for ENOENT (directory gone between existsSync and readdir)', async () => {
+    // existsSync passes, but the directory has been removed before readdir —
+    // the ENOENT branch must still return [].
+    const { listDirectories } = await import('./phase-filesystem-adapter.js');
+    // We can't easily race the real FS, but we can verify the function tolerates
+    // a path that truly does not exist (existsSync returns false → early []).
+    const nonExistent = join(tmpdir(), 'gsd-does-not-exist-' + Date.now());
+    const result = await listDirectories(nonExistent);
+    expect(result).toEqual([]);
+  });
+});
+
+// ─── CR-3267 regression: error-propagation in readModifyWriteRoadmapMd ─────
+
+describe('readModifyWriteRoadmapMd — CR-3267 finding 4: non-ENOENT errors propagate', () => {
+  it('propagates EACCES on ROADMAP.md readFile instead of treating as empty', async () => {
+    const { readModifyWriteRoadmapMd } = await import('./phase-lifecycle.js');
+    const dir = await mkdtemp(join(tmpdir(), 'gsd-roadmap-acl-'));
+    const planningDir = join(dir, '.planning');
+    await mkdir(planningDir, { recursive: true });
+    const roadmapPath = join(planningDir, 'ROADMAP.md');
+    await writeFile(roadmapPath, '# Roadmap\n', 'utf-8');
+    try {
+      await import('node:fs/promises').then(m => m.chmod(roadmapPath, 0o000));
+      await expect(
+        readModifyWriteRoadmapMd(dir, (c) => c)
+      ).rejects.toThrow();
+    } finally {
+      await import('node:fs/promises').then(m => m.chmod(roadmapPath, 0o644));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts with empty content when ROADMAP.md is absent (ENOENT)', async () => {
+    const { readModifyWriteRoadmapMd } = await import('./phase-lifecycle.js');
+    const dir = await mkdtemp(join(tmpdir(), 'gsd-roadmap-noent-'));
+    const planningDir = join(dir, '.planning');
+    await mkdir(planningDir, { recursive: true });
+    // No ROADMAP.md written — must default to '' and create it
+    try {
+      const result = await readModifyWriteRoadmapMd(dir, (c) => c + 'NEW');
+      expect(result).toBe('NEW');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── CR-3267 regression: buildPhaseRoadmapEntry — no "Phase 0" dependency ──
+
+describe('buildPhaseRoadmapEntry — CR-3267 finding 2: first sequential phase has no predecessor', () => {
+  it('omits Depends on line when phaseId is 1', async () => {
+    const { buildPhaseRoadmapEntry } = await import('./phase-lifecycle-policy.js');
+    const entry = buildPhaseRoadmapEntry(1, 'Bootstrap', 'sequential');
+    expect(entry).not.toContain('Depends on');
+    expect(entry).not.toContain('Phase 0');
+  });
+
+  it('includes Depends on line when phaseId is 2', async () => {
+    const { buildPhaseRoadmapEntry } = await import('./phase-lifecycle-policy.js');
+    const entry = buildPhaseRoadmapEntry(2, 'Second Phase', 'sequential');
+    expect(entry).toContain('**Depends on:** Phase 1');
+  });
+
+  it('omits Depends on line for custom naming mode regardless of id', async () => {
+    const { buildPhaseRoadmapEntry } = await import('./phase-lifecycle-policy.js');
+    const entry = buildPhaseRoadmapEntry('ALPHA', 'Custom', 'custom');
+    expect(entry).not.toContain('Depends on');
+  });
+});
+
+// ─── CR-3267 regression: collectDecimalSuffixesFromDirNames prefix grammar ─
+
+describe('collectDecimalSuffixesFromDirNames — CR-3267 finding 3: alphanumeric prefixes accepted', () => {
+  it('matches directories with long alphanumeric project-code prefix', async () => {
+    const { collectDecimalSuffixesFromDirNames } = await import('./phase-lifecycle-policy.js');
+    // Prefix "MYAPP01" is longer than 6 chars and contains digits — was rejected before fix
+    const dirs = ['MYAPP01-3.1-some-work', 'MYAPP01-3.2-other-work', 'unrelated-dir'];
+    const result = collectDecimalSuffixesFromDirNames('3', dirs);
+    expect(result.has(1)).toBe(true);
+    expect(result.has(2)).toBe(true);
+  });
+
+  it('still matches directories with short uppercase-only prefix', async () => {
+    const { collectDecimalSuffixesFromDirNames } = await import('./phase-lifecycle-policy.js');
+    const dirs = ['AB-5.1-task', 'AB-5.3-other'];
+    const result = collectDecimalSuffixesFromDirNames('5', dirs);
+    expect(result.has(1)).toBe(true);
+    expect(result.has(3)).toBe(true);
+  });
+
+  it('matches directories with no prefix', async () => {
+    const { collectDecimalSuffixesFromDirNames } = await import('./phase-lifecycle-policy.js');
+    const dirs = ['3.1-plain', '3.2-also-plain'];
+    const result = collectDecimalSuffixesFromDirNames('3', dirs);
+    expect(result.has(1)).toBe(true);
+    expect(result.has(2)).toBe(true);
   });
 });

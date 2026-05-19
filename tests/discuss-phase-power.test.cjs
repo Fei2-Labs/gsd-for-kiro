@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * GSD Tools Tests - discuss-phase power user mode
  *
@@ -37,12 +42,17 @@ describe('discuss-phase power user mode (#1513)', () => {
 
   describe('main workflow file (discuss-phase.md)', () => {
     test('has power_user_mode section or references discuss-phase-power.md', () => {
-      const content = fs.readFileSync(workflowPath, 'utf8');
-      const hasPowerSection = content.includes('power_user_mode') || content.includes('power user mode');
+      // After #2551, the power dispatch lives in discuss-phase/modes/power.md and
+      // the parent references it via the dispatch table.
+      const parentContent = fs.readFileSync(workflowPath, 'utf8');
+      const powerModePath = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'discuss-phase', 'modes', 'power.md');
+      const powerMode = fs.existsSync(powerModePath) ? fs.readFileSync(powerModePath, 'utf8') : '';
+      const content = parentContent + '\n' + powerMode;
+      const hasPowerSection = content.includes('power_user_mode') || content.includes('power user mode') || content.includes('modes/power.md');
       const hasReference = content.includes('discuss-phase-power');
       assert.ok(
         hasPowerSection || hasReference,
-        'discuss-phase.md should have power_user_mode section or reference discuss-phase-power.md'
+        'discuss-phase.md (or modes/power.md after #2551) should have power_user_mode section or reference discuss-phase-power.md'
       );
     });
 

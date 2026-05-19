@@ -1,5 +1,10 @@
 'use strict';
 
+// Migrated to typed-IR (#2974): execGraphify now returns a typed
+// `reason` field (GRAPHIFY_REASON enum) alongside exitCode/stdout/stderr.
+// Tests assert on result.reason instead of grepping stderr for failure
+// phrases like 'not found' or 'timed out'.
+
 /**
  * Tests for get-shit-done/bin/lib/graphify.cjs
  *
@@ -19,6 +24,7 @@ const {
   isGraphifyEnabled,
   disabledResponse,
   execGraphify,
+  GRAPHIFY_REASON,
   checkGraphifyInstalled,
   checkGraphifyVersion,
   // Phase 2
@@ -181,7 +187,9 @@ describe('execGraphify', () => {
 
     const result = execGraphify('/tmp', ['build']);
     assert.strictEqual(result.exitCode, 127);
-    assert.ok(result.stderr.includes('not found'));
+    // Migrated #2974: assert on the typed `reason` field instead of
+    // grepping stderr for 'not found'.
+    assert.strictEqual(result.reason, GRAPHIFY_REASON.ENOENT);
   });
 
   test('returns exitCode 124 on timeout', () => {
@@ -195,7 +203,9 @@ describe('execGraphify', () => {
 
     const result = execGraphify('/tmp', ['build']);
     assert.strictEqual(result.exitCode, 124);
-    assert.ok(result.stderr.includes('timed out'));
+    // Migrated #2974: typed reason instead of stderr grep.
+    assert.strictEqual(result.reason, GRAPHIFY_REASON.TIMEOUT);
+    assert.strictEqual(result.timeout_ms, 30000);
   });
 
   test('passes PYTHONUNBUFFERED=1 in env', () => {
@@ -384,18 +394,41 @@ describe('checkGraphifyVersion', () => {
     assert.ok(result.warning.includes('Could not parse'));
   });
 
-  test('calls python3 with importlib.metadata', () => {
-    let capturedCmd;
-    let capturedArgs;
+  test('tries graphify --version first before python3', () => {
+    const calls = [];
     mock.method(childProcess, 'spawnSync', (cmd, args) => {
-      capturedCmd = cmd;
-      capturedArgs = args;
+      calls.push({ cmd, args });
       return { status: 0, stdout: '0.4.3\n', stderr: '', error: undefined, signal: null };
     });
 
     checkGraphifyVersion();
-    assert.strictEqual(capturedCmd, 'python3');
-    assert.ok(capturedArgs.some(arg => arg.includes('importlib.metadata')));
+    assert.strictEqual(calls.length, 1, 'exactly one spawnSync call — no python3 fallback');
+    assert.strictEqual(calls[0].cmd, 'graphify');
+    assert.ok(calls[0].args.includes('--version'), 'graphify called with --version');
+    const python3Calls = calls.filter(c => c.cmd === 'python3');
+    assert.strictEqual(python3Calls.length, 0, 'no python3 fallback when graphify --version succeeds');
+  });
+
+  test('falls back to python3 importlib.metadata when graphify --version fails', () => {
+    const calls = [];
+    mock.method(childProcess, 'spawnSync', (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'graphify') {
+        return { status: 1, stdout: '', stderr: 'unknown option', error: undefined, signal: null };
+      }
+      // python3 fallback
+      return { status: 0, stdout: '0.4.3\n', stderr: '', error: undefined, signal: null };
+    });
+
+    const result = checkGraphifyVersion();
+    assert.strictEqual(result.version, '0.4.3');
+    assert.strictEqual(result.compatible, true);
+    assert.ok(calls.length >= 2, 'at least two spawnSync calls (graphify attempt + python3 fallback)');
+    assert.strictEqual(calls[0].cmd, 'graphify', 'graphify call precedes python3 fallback');
+    assert.ok(calls[0].args.includes('--version'), 'graphify --version attempted first');
+    const lastCall = calls[calls.length - 1];
+    assert.strictEqual(lastCall.cmd, 'python3', 'python3 fallback fires last');
+    assert.ok(lastCall.args.some(arg => arg.includes('importlib.metadata')));
   });
 });
 
@@ -464,6 +497,17 @@ describe('buildAdjacencyMap', () => {
     assert.ok(entry);
     assert.strictEqual(entry.edge.label, 'reads_from');
     assert.strictEqual(entry.edge.confidence, 'EXTRACTED');
+  });
+
+  // LINKS-01: graphify emits 'links' key; reader must fall back to it
+  test('falls back to graph.links when graph.edges is absent (LINKS-01)', () => {
+    const graphWithLinks = {
+      nodes: SAMPLE_GRAPH.nodes,
+      links: SAMPLE_GRAPH.edges,
+    };
+    const adj = buildAdjacencyMap(graphWithLinks);
+    assert.ok(adj['n1'].some(e => e.target === 'n2'), 'adjacency must traverse links');
+    assert.ok(adj['n2'].some(e => e.target === 'n1'), 'reverse adjacency must work');
   });
 });
 
@@ -678,6 +722,19 @@ describe('graphifyStatus', () => {
     const result = graphifyStatus(tmpDir);
     assert.strictEqual(result.hyperedge_count, 1);
   });
+
+  // LINKS-02: status edge_count must read graph.links when graph.edges is absent
+  test('reports correct edge_count when graph uses links key (LINKS-02)', () => {
+    enableGraphify(planningDir);
+    const graphWithLinks = {
+      nodes: SAMPLE_GRAPH.nodes,
+      links: SAMPLE_GRAPH.edges,
+      hyperedges: [],
+    };
+    writeGraphJson(planningDir, graphWithLinks);
+    const result = graphifyStatus(tmpDir);
+    assert.strictEqual(result.edge_count, 5, 'edge_count must equal links array length');
+  });
 });
 
 // ─── graphifyDiff (DIFF-01, DIFF-02) ──────────────────────────────────────
@@ -769,6 +826,35 @@ describe('graphifyDiff', () => {
     const result = graphifyDiff(tmpDir);
     assert.strictEqual(result.nodes.changed, 1, 'n1 label changed');
     assert.strictEqual(result.edges.changed, 1, 'edge confidence changed');
+  });
+
+  // LINKS-03: diff must handle links key in both current and snapshot (LINKS-03)
+  test('detects edge changes when graphs use links key (LINKS-03)', () => {
+    enableGraphify(planningDir);
+    const snapshot = {
+      nodes: [
+        { id: 'n1', label: 'AuthService', description: 'Auth', type: 'service' },
+        { id: 'n2', label: 'UserModel', description: 'User', type: 'model' },
+      ],
+      links: [
+        { source: 'n1', target: 'n2', label: 'reads_from', confidence: 'INFERRED' },
+      ],
+    };
+    const current = {
+      nodes: [
+        { id: 'n1', label: 'AuthService', description: 'Auth', type: 'service' },
+        { id: 'n2', label: 'UserModel', description: 'User', type: 'model' },
+      ],
+      links: [
+        { source: 'n1', target: 'n2', label: 'reads_from', confidence: 'EXTRACTED' },
+      ],
+    };
+    writeSnapshotJson(planningDir, snapshot);
+    writeGraphJson(planningDir, current);
+    const result = graphifyDiff(tmpDir);
+    assert.strictEqual(result.edges.changed, 1, 'edge confidence change must be detected via links key');
+    assert.strictEqual(result.edges.added, 0);
+    assert.strictEqual(result.edges.removed, 0);
   });
 });
 

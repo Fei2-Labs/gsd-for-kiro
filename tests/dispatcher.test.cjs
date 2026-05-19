@@ -48,7 +48,7 @@ describe('dispatcher error paths', () => {
       path.join(tmpDir, '.planning', 'STATE.md'),
       '# Project State\n\n## Current Position\n\nPhase: 1 of 1 (Test)\n'
     );
-    const result = runGsdTools(`--cwd=${tmpDir} state load`, process.cwd());
+    const result = runGsdTools(['--cwd=' + tmpDir, 'state', 'load'], process.cwd());
     assert.strictEqual(result.success, true, `Should succeed with --cwd=, got: ${result.error}`);
   });
 
@@ -64,6 +64,21 @@ describe('dispatcher error paths', () => {
     const result = runGsdTools('--cwd /nonexistent/path/xyz state load', tmpDir);
     assert.strictEqual(result.success, false, 'Should exit non-zero');
     assert.ok(result.error.includes('Invalid --cwd'), `Expected "Invalid --cwd" in stderr, got: ${result.error}`);
+  });
+
+  // Unknown subcommand: state
+  test('state unknown subcommand errors', () => {
+    const result = runGsdTools('state bogus', tmpDir);
+    assert.strictEqual(result.success, false, 'Should exit non-zero');
+    assert.ok(result.error.includes('Unknown state subcommand'), `Expected "Unknown state subcommand" in stderr, got: ${result.error}`);
+    // Pin the enumerated subcommand list. If a future refactor reformats the
+    // error string and silently drops 'complete-phase' from the available list,
+    // this test fails loudly rather than passing on the substring above.
+    // CodeRabbit nitpick on PR #2761.
+    assert.ok(
+      result.error.includes('complete-phase'),
+      `Expected enumerated subcommands to include "complete-phase", got: ${result.error}`,
+    );
   });
 
   // Unknown subcommand: template

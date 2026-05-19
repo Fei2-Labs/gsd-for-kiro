@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * Extract-Learnings Command & Workflow Tests
  *
@@ -11,12 +16,12 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const COMMAND_PATH = path.join(__dirname, '..', 'commands', 'gsd', 'extract_learnings.md');
-const WORKFLOW_PATH = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'extract_learnings.md');
+const COMMAND_PATH = path.join(__dirname, '..', 'commands', 'gsd', 'extract-learnings.md');
+const WORKFLOW_PATH = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'extract-learnings.md');
 
 describe('extract-learnings command', () => {
   test('command file exists', () => {
-    assert.ok(fs.existsSync(COMMAND_PATH), 'commands/gsd/extract_learnings.md should exist');
+    assert.ok(fs.existsSync(COMMAND_PATH), 'commands/gsd/extract-learnings.md should exist');
   });
 
   test('command file has correct name frontmatter', () => {
@@ -54,15 +59,15 @@ describe('extract-learnings command', () => {
   test('command references the workflow via execution_context', () => {
     const content = fs.readFileSync(COMMAND_PATH, 'utf-8');
     assert.ok(
-      content.includes('workflows/extract_learnings.md'),
-      'Command must reference workflows/extract_learnings.md in execution_context'
+      content.includes('workflows/extract-learnings.md'),
+      'Command must reference workflows/extract-learnings.md in execution_context'
     );
   });
 });
 
 describe('extract-learnings workflow', () => {
   test('workflow file exists', () => {
-    assert.ok(fs.existsSync(WORKFLOW_PATH), 'workflows/extract_learnings.md should exist');
+    assert.ok(fs.existsSync(WORKFLOW_PATH), 'workflows/extract-learnings.md should exist');
   });
 
   test('workflow has objective tag', () => {
@@ -81,6 +86,10 @@ describe('extract-learnings workflow', () => {
     const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
     assert.ok(content.includes('<step name='), 'Workflow must have named step tags');
     assert.ok(content.includes('</step>'), 'Workflow must close step tags');
+    assert.ok(
+      content.includes('<step name="extract-learnings">'),
+      'Workflow step must use hyphen convention: <step name="extract-learnings">',
+    );
   });
 
   test('workflow has success_criteria tag', () => {

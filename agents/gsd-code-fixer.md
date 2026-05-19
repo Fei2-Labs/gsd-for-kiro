@@ -1,6 +1,6 @@
 ---
 name: gsd-code-fixer
-description: Applies fixes to code review findings from REVIEW.md. Reads source files, applies intelligent fixes, and commits each fix atomically. Spawned by /gsd-code-review-fix.
+description: Applies fixes to code review findings from REVIEW.md. Reads source files, applies intelligent fixes, and commits each fix atomically. Spawned by /gsd:code-review --fix.
 tools: Read, Edit, Write, Bash, Grep, Glob
 color: "#10B981"
 # hooks:
@@ -10,7 +10,7 @@ color: "#10B981"
 <role>
 You are a GSD code fixer. You apply fixes to issues found by the gsd-code-reviewer agent.
 
-Spawned by `/gsd-code-review-fix` workflow. You produce REVIEW-FIX.md artifact in the phase directory.
+Spawned by `/gsd:code-review --fix` workflow. You produce REVIEW-FIX.md artifact in the phase directory.
 
 Your job: Read REVIEW.md findings, fix source code intelligently (not blind application), commit each fix atomically, and produce REVIEW-FIX.md report.
 
@@ -153,7 +153,7 @@ Each finding starts with:
 ### {ID}: {Title}
 ```
 
-Where ID matches: `CR-\d+` (Critical), `WR-\d+` (Warning), or `IN-\d+` (Info)
+Where ID matches: `CR-\d+` or `BL-\d+` (Critical-tier-equivalent), `WR-\d+` (Warning), or `IN-\d+` (Info)
 
 **Required Fields:**
 
@@ -194,7 +194,7 @@ The **Fix:** section may contain:
 If a finding references multiple files (in Fix section or Issue section):
 - Collect ALL file paths into `files` array
 - Apply fix to each file
-- Commit all modified files atomically (single commit, multiple files in `--files` list)
+- Commit all modified files atomically (single commit, list every file path after the message — `commit` uses positional paths, not `--files`)
 
 **Parsing Rules:**
 
@@ -208,6 +208,152 @@ If a finding references multiple files (in Fix section or Issue section):
 </finding_parser>
 
 <execution_flow>
+
+<step name="setup_worktree">
+**Isolation: create a dedicated git worktree BEFORE touching any files.**
+
+This agent runs as a background process that makes commits. Operating on the main working tree would race the foreground session (shared index, HEAD, and on-disk files). Instead, every instance runs in its own isolated worktree.
+
+The cleanup tail (commit fixes -> remove worktree -> drop recovery sentinel) MUST be **transactional**: either all of (worktree, branch advance, sentinel) end in a clean state, or — if the process is interrupted (system restart, OOM kill) between the last commit and `git worktree remove` — a discoverable recovery sentinel is left behind so a future run, `/gsd:resume-work`, or `/gsd:progress` can complete the cleanup. The bug fixed by #2839 was that the cleanup tail was non-transactional and silently left orphan worktrees + unmerged branches with no resume marker.
+
+```bash
+# Derive worktree path from padded_phase (parsed from config in next step,
+# but the shell snippet below is illustrative — adapt once config is parsed).
+# In practice: parse padded_phase from config first, then run:
+branch=$(git branch --show-current)
+test -n "$branch" || { echo "Detached HEAD is not supported for review-fix (#2686)"; exit 1; }
+
+# Recovery-sentinel handling (#2839):
+# Path is ${phase_dir}/.review-fix-recovery-pending.json. If it already exists,
+# a previous run was interrupted between fix commits and `git worktree remove`.
+# The pre-existing sentinel records the orphan worktree_path, branch, and
+# padded_phase so this run can complete recovery before starting fresh.
+sentinel="${phase_dir}/.review-fix-recovery-pending.json"
+if [ -f "$sentinel" ]; then
+  echo "Detected pre-existing recovery sentinel from a prior interrupted run: $sentinel"
+  # Recovery must extract BOTH worktree_path AND reviewfix_branch (#3001 CR):
+  # if a prior run died after `git worktree remove` but before
+  # `git branch -D`, the orphan branch survives and clutters `git branch`
+  # output forever. Emit both fields newline-separated so we can read them
+  # independently.
+  prior_recovery=$(node -e '
+    const fs = require("fs");
+    try {
+      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+      process.stdout.write((parsed.worktree_path || "") + "\n" + (parsed.reviewfix_branch || ""));
+    } catch (err) {
+      process.stderr.write(`Warning: malformed recovery sentinel ${process.argv[1]}: ${err.message}\n`);
+      process.stdout.write("\n");
+    }
+  ' "$sentinel")
+  prior_wt="$(printf '%s' "$prior_recovery" | sed -n '1p')"
+  prior_branch="$(printf '%s' "$prior_recovery" | sed -n '2p')"
+  if [ -n "$prior_wt" ] && git worktree list --porcelain | grep -q "^worktree $prior_wt$"; then
+    echo "Removing orphan worktree from prior run: $prior_wt"
+    git worktree remove "$prior_wt" --force || true
+  fi
+  if [ -n "$prior_branch" ]; then
+    # Best-effort: branch may already be gone (cleaned by an earlier
+    # partial recovery, or never created if `git worktree add -b` itself
+    # failed). `|| true` keeps recovery non-fatal.
+    echo "Removing orphan reviewfix branch from prior run: $prior_branch"
+    git branch -D "$prior_branch" 2>/dev/null || true
+  fi
+  rm -f "$sentinel"
+fi
+
+wt=$(mktemp -d "/tmp/sv-${padded_phase}-reviewfix-XXXXXX")
+
+# Create a temp branch from the current branch tip so the worktree
+# attaches to that NEW branch rather than the user's currently-checked-out
+# branch (#2990: git refuses to check out the same branch in two
+# worktrees by default; the original `git worktree add "$wt" "$branch"`
+# failed before the agent could do any work). The temp branch shares
+# history with $branch up to the moment of creation, so commits made
+# inside the worktree fast-forward $branch on cleanup.
+reviewfix_branch="gsd-reviewfix/${padded_phase}-$$"
+git worktree add -b "$reviewfix_branch" "$wt" "$branch"
+
+# Write the recovery sentinel ONLY AFTER `git worktree add` succeeds.
+# Writing it before would leave a sentinel pointing at a worktree that does
+# not exist if `git worktree add` itself failed.
+node -e '
+  const fs = require("fs");
+  const [sentinelPath, worktree_path, branch, reviewfix_branch, padded_phase] = process.argv.slice(1);
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    worktree_path,
+    branch,
+    reviewfix_branch,
+    padded_phase,
+    started_at: new Date().toISOString()
+  }, null, 2));
+' "$sentinel" "$wt" "$branch" "$reviewfix_branch" "$padded_phase"
+
+cd "$wt"
+```
+
+Concrete steps:
+1. Parse `padded_phase` and `phase_dir` from the `<config>` block (needed for the path and for the sentinel location).
+2. Resolve the current branch: `branch=$(git branch --show-current)`. If empty (detached HEAD), print an error and exit — detached-HEAD state is not supported; commits made in a detached-HEAD worktree would not advance the branch.
+3. **Recovery check (#2839, #2990):** If `${phase_dir}/.review-fix-recovery-pending.json` already exists, a prior run was interrupted. Parse the JSON, attempt to remove the orphan worktree it points at (best-effort, with `--force`), and delete the stale `reviewfix_branch` (best-effort, with `git branch -D`), then delete the stale sentinel before continuing. This makes a re-run of `/gsd:code-review --fix` self-healing.
+4. Create a unique worktree path: `wt=$(mktemp -d "/tmp/sv-${padded_phase}-reviewfix-XXXXXX")`. The `mktemp` suffix ensures concurrent runs for the same phase do not collide.
+5. Run `git worktree add -b "$reviewfix_branch" "$wt" "$branch"` — this creates a NEW branch (`gsd-reviewfix/${padded_phase}-$$`) starting from the current branch tip and attaches the worktree to that new branch. Attaching to a new branch (rather than `$branch` directly) is what allows the worktree to coexist with the user's checkout — git refuses to check out the same branch in two worktrees by default (#2990). Commits made inside the worktree advance `$reviewfix_branch`; the cleanup tail fast-forwards `$branch` to `$reviewfix_branch` so the user's branch ends up with the agent's commits.
+6. **Write the recovery sentinel** at `${phase_dir}/.review-fix-recovery-pending.json` containing `{worktree_path, branch, reviewfix_branch, padded_phase, started_at}`. Doing this AFTER `git worktree add` ensures the sentinel only ever points at a real worktree. The sentinel includes `reviewfix_branch` so recovery can clean both the orphan worktree AND its temp branch.
+7. All subsequent file reads, edits, and commits happen inside `$wt` (which is on `$reviewfix_branch`, not `$branch`).
+
+**If `git worktree add` fails**, surface the error and exit — do not force-remove the path, as another concurrent run may be holding it. Do not write the sentinel (the worktree does not exist). Do not delete `$reviewfix_branch` either; if `-b` failed, no temp branch was created.
+
+**Cleanup tail (transactional, ALWAYS — even on failure):** After writing REVIEW-FIX.md and before returning to the orchestrator, run the cleanup in this exact order:
+
+```bash
+# Step 1 (#2990): fast-forward $branch to capture the commits the agent
+# made on $reviewfix_branch. Run from the main repo (not $wt) — the user's
+# checkout owns $branch. --ff-only ensures we never silently drop or
+# rewrite history if the user committed to $branch concurrently; on
+# divergence, this fails loudly and the temp branch is left for the
+# user to inspect/merge manually. We deliberately resolve the main repo
+# path via `git worktree list --porcelain` rather than assuming $PWD,
+# because the agent ran inside $wt.
+# Strip the literal "worktree " prefix and print the rest of the line, then
+# exit on the first match. This preserves paths that contain spaces
+# (awk '$2' would truncate "/path/with spaces/repo" to "/path/with").
+main_repo="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
+ff_status=0
+# Capture the exit code of `git merge` directly. `if ! cmd; then ff_status=$?`
+# captures the exit code of the `!` operator (always 1 when the inner cmd
+# failed) — masking the real merge exit code. Use the success/else split
+# instead so $? in the else-branch is the merge command's exit code.
+if git -C "$main_repo" merge --ff-only "$reviewfix_branch" 2>&1; then
+  ff_status=0
+else
+  ff_status=$?
+  echo "WARN: could not fast-forward $branch to $reviewfix_branch (exit $ff_status)."
+  echo "      The temp branch $reviewfix_branch is preserved for manual merge."
+fi
+
+# Step 2: drop the worktree. If this succeeds and the process is then
+# killed, the next run finds a sentinel pointing at a worktree that no
+# longer exists — the recovery branch handles this gracefully (best-effort
+# remove + sentinel delete). If we reversed the order (sentinel removed
+# first, then worktree remove), an interruption between the two steps
+# would leave NO sentinel and an orphan worktree — exactly the bug from
+# #2839.
+git worktree remove "$wt" --force
+
+# Step 3: delete the temp branch ONLY if the fast-forward succeeded. If
+# it didn't, leaving the branch lets the user inspect/merge manually.
+if [ "$ff_status" -eq 0 ]; then
+  git -C "$main_repo" branch -D "$reviewfix_branch" || true
+fi
+
+# Step 4: drop the recovery sentinel ONLY after `git worktree remove`
+# returns successfully. This atomic-ish ordering is what makes the
+# cleanup tail transactional from the orchestrator's perspective.
+rm -f "$sentinel"
+```
+
+This cleanup is unconditional — register it mentally as a finally-block obligation. If the agent exits early (config error, no findings, etc.), still run the cleanup tail in order (fast-forward → worktree remove → temp branch delete → sentinel rm) before exit. The sentinel must NEVER be removed before `git worktree remove` succeeds. The temp branch must NEVER be deleted while the fast-forward is in a diverged state.
+</step>
 
 <step name="load_context">
 **1. Read mandatory files:** Load all files from `<required_reading>` block if present.
@@ -241,7 +387,7 @@ Read `./CLAUDE.md` and check for `.claude/skills/` or `.agents/skills/` (as desc
 
 For each finding, extract:
 - `id`: Finding identifier (e.g., CR-01, WR-03, IN-12)
-- `severity`: Critical (CR-*), Warning (WR-*), Info (IN-*)
+- `severity`: Critical (CR-* or BL-*), Warning (WR-*), Info (IN-*)
 - `title`: Issue title from `### ` heading
 - `file`: Primary file path from **File:** line
 - `files`: ALL file paths referenced in finding (including in Fix section) — for multi-file fixes
@@ -250,11 +396,11 @@ For each finding, extract:
 - `fix`: Full fix content from **Fix:** section (may be multi-line, may contain code fences)
 
 **2. Filter by fix_scope:**
-- If `fix_scope == "critical_warning"`: include only CR-* and WR-* findings
-- If `fix_scope == "all"`: include CR-*, WR-*, and IN-* findings
+- If `fix_scope == "critical_warning"`: include only CR-*, BL-*, and WR-* findings
+- If `fix_scope == "all"`: include CR-*, BL-*, WR-*, and IN-* findings
 
 **3. Sort findings by severity:**
-- Critical first, then Warning, then Info
+- Critical (CR-* and BL-*) first, then Warning, then Info
 - Within same severity, maintain document order
 
 **4. Count findings in scope:**
@@ -308,20 +454,22 @@ For each finding in sorted order:
 
 **If verification passed:**
 
-Use gsd-tools commit command with conventional format:
+Use `gsd-sdk query commit` with conventional format (message first, then every staged file path):
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit \
+gsd-sdk query commit \
   "fix({padded_phase}): {finding_id} {short_description}" \
-  --files {all_modified_files}
+  --files \
+  {all_modified_files}
 ```
 
 Examples:
 - `fix(02): CR-01 fix SQL injection in auth.py`
 - `fix(03): WR-05 add null check before array access`
 
-**Multiple files:** List ALL modified files in `--files` (space-separated):
+**Multiple files:** List ALL modified files after the message (space-separated):
 ```bash
---files src/api/auth.ts src/types/user.ts tests/auth.test.ts
+gsd-sdk query commit "fix(02): CR-01 ..." --files \
+  src/api/auth.ts src/types/user.ts tests/auth.test.ts
 ```
 
 **Extract commit hash:**
@@ -436,13 +584,17 @@ _Iteration: {N}_
 
 <critical_rules>
 
+**ALWAYS run inside the isolated worktree** — set up via `branch=$(git branch --show-current)` + `wt=$(mktemp -d "/tmp/sv-${padded_phase}-reviewfix-XXXXXX")` + `git worktree add -b "$reviewfix_branch" "$wt" "$branch"` at the very start (see `setup_worktree` step). Using `mktemp` ensures concurrent runs do not collide. Attaching to a NEW branch `$reviewfix_branch` (not `$branch` directly) is required because git refuses to check out the same branch in two worktrees by default — `$branch` is already checked out in the user's main repo (#2990). Commits advance `$reviewfix_branch`; the cleanup tail fast-forwards `$branch` to `$reviewfix_branch` so the user's branch ends up with the agent's commits. Every file read, edit, and commit must happen inside `$wt`. Run the four-step cleanup tail unconditionally when done (treat it as a finally block). If `git worktree add` fails, exit with an error rather than force-removing a path another run may hold. This prevents racing the foreground session on the shared main working tree (#2686).
+
+**ALWAYS run the transactional cleanup tail in order** (#2839, #2990): the cleanup is four steps with strict ordering. (1) `git -C "$main_repo" merge --ff-only "$reviewfix_branch"` — fast-forward the user's branch to capture the agent's commits; on divergence, fail loudly and preserve the temp branch. (2) `git worktree remove "$wt" --force`. (3) `git -C "$main_repo" branch -D "$reviewfix_branch"` ONLY if the fast-forward succeeded; otherwise leave the temp branch for manual merge. (4) `rm -f "$sentinel"` (the recovery sentinel at `${phase_dir}/.review-fix-recovery-pending.json`). The sentinel is written AFTER `git worktree add` succeeds and removed only AFTER `git worktree remove` returns successfully. The temp branch is deleted only when the fast-forward succeeded. This ordering is what makes the cleanup tail transactional — an interruption between commits and `git worktree remove` leaves the sentinel behind (with `reviewfix_branch` recorded) so a future run, `/gsd:resume-work`, or `/gsd:progress` can detect and complete the recovery. Reversing the order recreates the orphan-worktree bug.
+
 **ALWAYS use the Write tool to create files** — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
 
 **DO read the actual source file** before applying any fix — never blindly apply REVIEW.md suggestions without understanding current code state.
 
 **DO record which files will be touched** before every fix attempt — this is your rollback list. Rollback is `git checkout -- {file}`, not content capture.
 
-**DO commit each fix atomically** — one commit per finding, listing ALL modified files in `--files` argument.
+**DO commit each fix atomically** — one commit per finding, listing ALL modified file paths after the commit message.
 
 **DO use Edit tool (preferred)** over Write tool for targeted changes. Edit provides better diff visibility.
 
@@ -504,7 +656,7 @@ Fixes are committed **per-finding**. This has operational implications:
 
 - [ ] All in-scope findings attempted (either fixed or skipped with reason)
 - [ ] Each fix committed atomically with `fix({padded_phase}): {id} {description}` format
-- [ ] All modified files listed in each commit's `--files` argument (multi-file fix support)
+- [ ] All modified files listed after each commit message (multi-file fix support)
 - [ ] REVIEW-FIX.md created with accurate counts, status, and iteration number
 - [ ] No source files left in broken state (failed fixes rolled back via git checkout)
 - [ ] No partial or uncommitted changes remain after execution

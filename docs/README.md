@@ -9,21 +9,30 @@ Language versions: [English](README.md) · [Português (pt-BR)](pt-BR/README.md)
 | Document | Audience | Description |
 |----------|----------|-------------|
 | [Architecture](ARCHITECTURE.md) | Contributors, advanced users | System architecture, agent model, data flow, and internal design |
-| [Feature Reference](FEATURES.md) | All users | Complete feature and function documentation with requirements |
-| [Command Reference](COMMANDS.md) | All users | Every command with syntax, flags, options, and examples |
+| [Installer Migrations](installer-migrations.md) | Contributors | Architecture for safe install-time migrations, cleanup, preservation, dry-run planning, and rollback |
+| [Feature Reference](FEATURES.md) | All users | Feature narratives and requirements for released features (see [CHANGELOG](../CHANGELOG.md) for latest additions) |
+| [v1.42.3 Release Notes](RELEASE-v1.42.3.md) | All users | Hotfix release notes for 1.42.3 — Codex CLI 0.130.0 install routability and 11 other fixes |
+| [v1.42.1 Release Notes](RELEASE-v1.42.1.md) | All users | Stable release notes for the 1.42.1 release |
+| [Command Reference](COMMANDS.md) | All users | Stable commands with syntax, flags, options, and examples |
 | [Configuration Reference](CONFIGURATION.md) | All users | Full config schema, workflow toggles, model profiles, git branching |
+| [Custom PR Body Sections](ship-pr-body-sections.md) | All users | How to append project-specific PRD sections to `/gsd-ship` PR bodies |
 | [CLI Tools Reference](CLI-TOOLS.md) | Contributors, agent authors | `gsd-tools.cjs` programmatic API for workflows and agents |
-| [Agent Reference](AGENTS.md) | Contributors, advanced users | All 18 specialized agents — roles, tools, spawn patterns |
+| [JSON Error Mode](json-errors.md) | Contributors, agent authors | Machine-readable `gsd-tools --json-errors` failure envelopes |
+| [Agent Reference](AGENTS.md) | Contributors, advanced users | Role cards for primary agents — roles, tools, spawn patterns (the `agents/` filesystem is authoritative) |
 | [User Guide](USER-GUIDE.md) | All users | Workflow walkthroughs, troubleshooting, and recovery |
+| [Issue-Driven Orchestration](issue-driven-orchestration.md) | All users | Recipe for driving GSD from a tracker issue (GitHub / Linear / Jira) using existing primitives — no new commands or daemon |
 | [Context Monitor](context-monitor.md) | All users | Context window monitoring hook architecture |
 | [Discuss Mode](workflow-discuss-mode.md) | All users | Assumptions vs interview mode for discuss-phase |
+| [Canary Stream](CANARY.md) | Contributors, early adopters | `dev` → `@canary` dist-tag policy, when to install, rollback path |
 
 ## Quick Links
 
-- **What's new in v1.32:** STATE.md consistency gates, `--to N` autonomous flag, research gate, verifier scope filtering, read-before-edit guard, 4 new runtimes (Trae, Kilo, Augment, Cline), context reduction, response language config — see [CHANGELOG](../CHANGELOG.md)
+- **What's new:** see [v1.42.3 Release Notes](RELEASE-v1.42.3.md) (latest hotfix), [v1.42.1 Release Notes](RELEASE-v1.42.1.md), [CHANGELOG](../CHANGELOG.md), and upstream [README](../README.md) for release highlights
+- **Canary preview:** [`docs/CANARY.md`](CANARY.md) — opt into the early-preview stream from `dev`. Active cut: [`v1.50.0-canary.1`](RELEASE-v1.50.0-canary.1.md)
 - **Getting started:** [README](../README.md) → install → `/gsd-new-project`
 - **Full workflow walkthrough:** [User Guide](USER-GUIDE.md)
 - **All commands at a glance:** [Command Reference](COMMANDS.md)
 - **Configuring GSD:** [Configuration Reference](CONFIGURATION.md)
+- **Customizing ship PR bodies:** [Custom PR Body Sections](ship-pr-body-sections.md)
 - **How the system works internally:** [Architecture](ARCHITECTURE.md)
 - **Contributing or extending:** [CLI Tools Reference](CLI-TOOLS.md) + [Agent Reference](AGENTS.md)

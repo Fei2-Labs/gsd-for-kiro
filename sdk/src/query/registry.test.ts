@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { QueryRegistry, extractField } from './registry.js';
+import { QueryRegistry, extractField, resolveQueryArgv } from './registry.js';
 import { createRegistry, QUERY_MUTATION_COMMANDS } from './index.js';
 import type { QueryResult } from './utils.js';
 
@@ -77,7 +77,7 @@ describe('QueryRegistry', () => {
 
     const result = await registry.dispatch('test-cmd', ['arg1'], '/tmp');
 
-    expect(handler).toHaveBeenCalledWith(['arg1'], '/tmp');
+    expect(handler).toHaveBeenCalledWith(['arg1'], '/tmp', undefined);
     expect(result).toEqual({ data: { value: 'arg1' } });
   });
 
@@ -130,10 +130,79 @@ describe('createRegistry', () => {
     expect(registry.has('current-timestamp')).toBe(true);
   });
 
+  it('has summary-extract dash alias (PR #2179 / workflows)', () => {
+    const registry = createRegistry();
+    expect(registry.has('summary-extract')).toBe(true);
+  });
+
   it('can dispatch generate-slug', async () => {
     const registry = createRegistry();
     const result = await registry.dispatch('generate-slug', ['My Phase'], '/tmp');
 
     expect(result).toEqual({ data: { slug: 'my-phase' } });
+  });
+});
+
+// ─── resolveQueryArgv ───────────────────────────────────────────────────────
+
+describe('resolveQueryArgv', () => {
+  it('matches longest dotted prefix (state.update + args)', () => {
+    const registry = createRegistry();
+    const m = resolveQueryArgv(['state', 'update', 'status', 'X'], registry);
+    expect(m).toEqual({ cmd: 'state.update', args: ['status', 'X'] });
+  });
+
+  it('matches longest prefix (phase.add wins over phase when both registered)', () => {
+    const registry = createRegistry();
+    const m = resolveQueryArgv(['phase', 'add', 'desc'], registry);
+    expect(m).toEqual({ cmd: 'phase.add', args: ['desc'] });
+  });
+
+  it('prefers longer match over shorter', () => {
+    const registry = createRegistry();
+    const m = resolveQueryArgv(['state', 'load'], registry);
+    expect(m?.cmd).toBe('state.load');
+    expect(m?.args).toEqual([]);
+  });
+
+  it('returns null when no prefix matches', () => {
+    const registry = createRegistry();
+    const m = resolveQueryArgv(['totally-unknown', 'x'], registry);
+    expect(m).toBeNull();
+  });
+
+  it('matches a single dotted command token', () => {
+    const registry = createRegistry();
+    expect(resolveQueryArgv(['init.new-project'], registry)).toEqual({
+      cmd: 'init.new-project',
+      args: [],
+    });
+  });
+
+  // Regression: #2597 — dotted command token followed by positional args.
+  // Before the fix, argv like ['init.execute-phase', '1'] returned null because
+  // expansion only ran for single-token input.
+  it('matches a dotted command token when positional args follow (#2597)', () => {
+    const registry = createRegistry();
+    expect(resolveQueryArgv(['init.execute-phase', '1'], registry)).toEqual({
+      cmd: 'init.execute-phase',
+      args: ['1'],
+    });
+  });
+
+  it('matches dotted state.update with trailing args (#2597)', () => {
+    const registry = createRegistry();
+    expect(resolveQueryArgv(['state.update', 'status', 'X'], registry)).toEqual({
+      cmd: 'state.update',
+      args: ['status', 'X'],
+    });
+  });
+
+  it('matches dotted phase.add with trailing args (#2597)', () => {
+    const registry = createRegistry();
+    expect(resolveQueryArgv(['phase.add', 'desc'], registry)).toEqual({
+      cmd: 'phase.add',
+      args: ['desc'],
+    });
   });
 });

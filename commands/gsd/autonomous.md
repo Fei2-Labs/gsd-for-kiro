@@ -9,8 +9,8 @@ allowed-tools:
   - Glob
   - Grep
   - AskUserQuestion
-  - Task
   - Agent
+requires: [cleanup, phase, progress]
 ---
 <objective>
 Execute all remaining milestone phases autonomously. For each phase: discuss → plan → execute. Pauses only for user decisions (grey area acceptance, blockers, validation requests).
@@ -37,10 +37,10 @@ Optional flags:
 - `--only N` — execute only phase N (single-phase mode).
 - `--interactive` — run discuss inline with questions (not auto-answered), then dispatch plan→execute as background agents. Keeps the main context lean while preserving user input on decisions.
 
-Project context, phase list, and state are resolved inside the workflow using init commands (`gsd-tools.cjs init milestone-op`, `gsd-tools.cjs roadmap analyze`). No upfront context loading needed.
+Project context, phase list, and state are resolved inside the workflow using init commands (`gsd-sdk query init.milestone-op`, `gsd-sdk query roadmap.analyze`). No upfront context loading needed.
 </context>
 
 <process>
-Execute the autonomous workflow from @~/.claude/get-shit-done/workflows/autonomous.md end-to-end.
+Execute end-to-end.
 Preserve all workflow gates (phase discovery, per-phase execution, blocker handling, progress display).
 </process>

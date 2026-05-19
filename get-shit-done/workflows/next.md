@@ -14,7 +14,7 @@ Read project state to determine current position:
 
 ```bash
 # Get state snapshot
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state json 2>/dev/null || echo "{}"
+gsd-sdk query state.json 2>/dev/null || echo "{}"
 ```
 
 Also read:
@@ -29,7 +29,7 @@ Extract:
 
 If no `.planning/` directory exists:
 ```
-No GSD project detected. Run `/gsd-new-project` to get started.
+No GSD project detected. Run `/gsd:new-project` to get started.
 ```
 Exit.
 </step>
@@ -65,7 +65,7 @@ If found:
 ⛔ Hard stop: Project in error state
 
 STATE.md shows status: {status}. Resolve the error before advancing.
-Run `/gsd-health` to diagnose, or manually fix STATE.md.
+Run `/gsd:health` to diagnose, or manually fix STATE.md.
 Use `--force` to bypass this check.
 ```
 Exit.
@@ -83,7 +83,7 @@ Use `--force` to bypass this check.
 Exit.
 
 **Prior-phase completeness scan:**
-After passing all three hard-stop gates, scan all phases that precede the current phase in ROADMAP.md order for incomplete work. Use the existing `gsd-tools.cjs phase json <N>` output to inspect each prior phase.
+After passing all three hard-stop gates, scan all phases that precede the current phase in ROADMAP.md order for incomplete work. For each prior phase number `N`, use `gsd-sdk query find-phase <N>` JSON (plans, summaries, incomplete_plans, etc.) to inspect that phase.
 
 Detect three categories of incomplete work:
 1. **Plans without summaries** — a PLAN.md exists in a prior phase directory but no matching SUMMARY.md exists (execution started but not completed).
@@ -121,17 +121,40 @@ Choice [S]:
 
 **Goal:** Resolve plans that ran without producing summaries during Phase {src} execution
 **Source phase:** {src}
-**Deferred at:** {date} during /gsd-next advancement to Phase {dest}
+**Deferred at:** {date} during /gsd:progress --next advancement to Phase {dest}
 **Plans:**
 - [ ] {N}-{M}: {slug} (ran, no SUMMARY.md)
 ```
 2. Commit the deferral record:
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs: defer incomplete Phase {src} items to backlog"
+gsd-sdk query commit "docs: defer incomplete Phase {src} items to backlog"
 ```
 3. Continue routing to `determine_next_action` immediately — no second prompt.
 
 **If the user chooses "Force" (F):** Continue to `determine_next_action` without recording deferral.
+</step>
+
+<step name="spike_sketch_notice">
+Check for pending spike/sketch work and surface a notice (does not change routing):
+
+```bash
+# Check for pending spikes (verdict: PENDING in any README)
+PENDING_SPIKES=$(grep -rl 'verdict: PENDING' .planning/spikes/*/README.md 2>/dev/null | wc -l | tr -d ' ')
+
+# Check for pending sketches (winner: null in any README)
+PENDING_SKETCHES=$(grep -rl 'winner: null' .planning/sketches/*/README.md 2>/dev/null | wc -l | tr -d ' ')
+```
+
+If either count is > 0, display before routing:
+```
+⚠ Pending exploratory work:
+  {PENDING_SPIKES} spike(s) with unresolved verdicts in .planning/spikes/
+  {PENDING_SKETCHES} sketch(es) without a winning variant in .planning/sketches/
+
+  Resume with `/gsd:spike` or `/gsd:sketch`, or continue with phase work below.
+```
+
+Only show lines for non-zero counts. If both are 0, skip this notice entirely.
 </step>
 
 <step name="determine_next_action">
@@ -139,35 +162,35 @@ Apply routing rules based on state:
 
 **Route 1: No phases exist yet → discuss**
 If ROADMAP has phases but no phase directories exist on disk:
-→ Next action: `/gsd-discuss-phase <first-phase>`
+→ Next action: `/gsd:discuss-phase <first-phase>`
 
 **Route 2: Phase exists but has no CONTEXT.md or RESEARCH.md → discuss**
 If the current phase directory exists but has neither CONTEXT.md nor RESEARCH.md:
-→ Next action: `/gsd-discuss-phase <current-phase>`
+→ Next action: `/gsd:discuss-phase <current-phase>`
 
 **Route 3: Phase has context but no plans → plan**
 If the current phase has CONTEXT.md (or RESEARCH.md) but no PLAN.md files:
-→ Next action: `/gsd-plan-phase <current-phase>`
+→ Next action: `/gsd:plan-phase <current-phase>`
 
 **Route 4: Phase has plans but incomplete summaries → execute**
 If plans exist but not all have matching summaries:
-→ Next action: `/gsd-execute-phase <current-phase>`
+→ Next action: `/gsd:execute-phase <current-phase>`
 
 **Route 5: All plans have summaries → verify and complete**
 If all plans in the current phase have summaries:
-→ Next action: `/gsd-verify-work`
+→ Next action: `/gsd:verify-work`
 
 **Route 6: Phase complete, next phase exists → advance**
 If the current phase is complete and the next phase exists in ROADMAP:
-→ Next action: `/gsd-discuss-phase <next-phase>`
+→ Next action: `/gsd:discuss-phase <next-phase>`
 
 **Route 7: All phases complete → complete milestone**
 If all phases are complete:
-→ Next action: `/gsd-complete-milestone`
+→ Next action: `/gsd:complete-milestone`
 
 **Route 8: Paused → resume**
 If STATE.md shows paused_at:
-→ Next action: `/gsd-resume-work`
+→ Next action: `/gsd:resume-work`
 </step>
 
 <step name="show_and_execute">
@@ -184,7 +207,7 @@ Display the determination:
 ```
 
 Then immediately invoke the determined command via SlashCommand.
-Do not ask for confirmation — the whole point of `/gsd-next` is zero-friction advancement.
+Do not ask for confirmation — the whole point of `/gsd:progress --next` is zero-friction advancement.
 </step>
 
 </process>

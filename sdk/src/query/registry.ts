@@ -2,8 +2,9 @@
  * Query command registry — routes commands to native SDK handlers.
  *
  * The registry is a flat `Map<string, QueryHandler>` that maps command names
- * to handler functions. Unknown commands throw GSDError — the gsd-tools.cjs
- * fallback was removed in v3.0 when all commands were migrated to native handlers.
+ * to handler functions. Unknown keys passed to `dispatch()` throw `GSDError`.
+ * The `gsd-sdk query` CLI resolves argv with `resolveQueryArgv()` before dispatch;
+ * there is no automatic delegation to `gsd-tools.cjs`.
  *
  * Also exports `extractField` — a TypeScript port of the `--pick` field
  * extraction logic from gsd-tools.cjs (lines 365-382).
@@ -21,6 +22,7 @@
 
 import type { QueryResult, QueryHandler } from './utils.js';
 import { GSDError, ErrorClassification } from '../errors.js';
+import { resolveQueryTokens } from './query-command-resolution-strategy.js';
 
 // ─── extractField ──────────────────────────────────────────────────────────
 
@@ -59,9 +61,9 @@ export function extractField(obj: unknown, fieldPath: string): unknown {
 /**
  * Flat command registry that routes query commands to native handlers.
  *
- * Unknown commands throw `GSDError` from `dispatch()` — there is no fallback
- * to gsd-tools.cjs (bridge removed in v3.0). All supported commands must be
- * registered via `register()`.
+ * `dispatch()` throws `GSDError` for unknown command keys. The `gsd-sdk query`
+ * CLI uses `resolveQueryArgv()` first; when no handler matches, it may shell out
+ * to `gsd-tools.cjs` (see `cli.ts` and `QUERY-HANDLERS.md` fallback policy).
  */
 export class QueryRegistry {
   private handlers = new Map<string, QueryHandler>();
@@ -106,16 +108,14 @@ export class QueryRegistry {
   /**
    * Dispatch a command to its registered native handler.
    *
-   * Throws GSDError for unknown commands — the gsd-tools.cjs fallback was
-   * removed in v3.0. All commands must be registered as native handlers (T-14-13).
-   *
    * @param command - The command name to dispatch
    * @param args - Arguments to pass to the handler
    * @param projectDir - The project directory for context
+   * @param workstream - Optional workstream name to scope .planning paths
    * @returns The query result from the handler
    * @throws GSDError if no handler is registered for the command
    */
-  async dispatch(command: string, args: string[], projectDir: string): Promise<QueryResult> {
+  async dispatch(command: string, args: string[], projectDir: string, workstream?: string): Promise<QueryResult> {
     const handler = this.handlers.get(command);
     if (!handler) {
       throw new GSDError(
@@ -123,6 +123,20 @@ export class QueryRegistry {
         ErrorClassification.Validation,
       );
     }
-    return handler(args, projectDir);
+    return handler(args, projectDir, workstream);
   }
+}
+
+/**
+ * Map argv after `gsd-sdk query` to a registered handler key and remaining args.
+ * Longest-prefix match on dotted (`a.b.c`) and spaced (`a b c`) keys; if no match,
+ * expands a single dotted token (`state.validate` → `state`, `validate`) and retries.
+ */
+export function resolveQueryArgv(
+  tokens: string[],
+  registry: QueryRegistry,
+): { cmd: string; args: string[] } | null {
+  const resolved = resolveQueryTokens(tokens, registry);
+  if (!resolved) return null;
+  return { cmd: resolved.cmd, args: resolved.args };
 }

@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * Validates the gates taxonomy reference document (#1715).
  *
@@ -89,7 +94,7 @@ describe('gates taxonomy (#1715)', () => {
   test('gsd-plan-checker.md references gates.md in required_reading block', () => {
     const planChecker = path.join(ROOT, 'agents', 'gsd-plan-checker.md');
     const content = fs.readFileSync(planChecker, 'utf-8');
-    const match = content.match(/<required_reading>\n([\s\S]*?)\n<\/required_reading>/);
+    const match = content.match(/<required_reading>\r?\n([\s\S]*?)\r?\n<\/required_reading>/);
     assert.ok(
       match,
       'gsd-plan-checker.md must have a <required_reading> block'
@@ -103,7 +108,7 @@ describe('gates taxonomy (#1715)', () => {
   test('gsd-verifier.md references gates.md in required_reading block', () => {
     const verifier = path.join(ROOT, 'agents', 'gsd-verifier.md');
     const content = fs.readFileSync(verifier, 'utf-8');
-    const match = content.match(/<required_reading>\n([\s\S]*?)\n<\/required_reading>/);
+    const match = content.match(/<required_reading>\r?\n([\s\S]*?)\r?\n<\/required_reading>/);
     assert.ok(
       match,
       'gsd-verifier.md must have a <required_reading> block'

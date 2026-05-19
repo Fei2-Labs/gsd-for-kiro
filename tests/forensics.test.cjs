@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * GSD Forensics Tests
  *
@@ -138,11 +143,33 @@ describe('forensics workflow', () => {
     );
   });
 
+  test('workflow submits issues to gsd-build/get-shit-done, not the current repo', () => {
+    const content = fs.readFileSync(workflowPath, 'utf-8');
+    // Scope check to the gh issue create invocation — a whole-file search would
+    // pass even if gh issue create lacked --repo, because gh label list also
+    // contains the repo string.
+    assert.match(
+      content,
+      /gh issue create[\s\S]{0,250}--repo\s+gsd-build\/get-shit-done/,
+      'gh issue create must use --repo gsd-build/get-shit-done to avoid submitting to the user\'s current project repo'
+    );
+  });
+
+  test('workflow checks bug label in gsd-build/get-shit-done, not the current repo', () => {
+    const content = fs.readFileSync(workflowPath, 'utf-8');
+    // Regex is more robust than a fixed-length slice to formatting changes
+    assert.match(
+      content,
+      /gh label list[\s\S]{0,250}--repo\s+gsd-build\/get-shit-done/,
+      'gh label list must target gsd-build/get-shit-done'
+    );
+  });
+
   test('workflow updates STATE.md', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(
-      content.includes('state record-session'),
-      'should update STATE.md via gsd-tools'
+      content.includes('state record-session') || content.includes('state.record-session'),
+      'should update STATE.md via state record-session (CJS or gsd-sdk query)'
     );
   });
 

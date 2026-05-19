@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * GSD Tools Tests - Milestone
  */
@@ -221,6 +225,46 @@ describe('milestone complete command', () => {
       state.includes('v1.0 milestone completed and archived'),
       'last activity description should reference milestone completion'
     );
+  });
+
+  test('normalizes stale STATE.md narrative tails after milestone complete (#3088)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap v1.0\n`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Status:** In progress\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working\n\n## Current Position\n\nPhase: 03 — EXECUTING\nPlan: 03-02\nStatus: Executing\nLast activity: 2025-01-01 — Running phase\n\n## Operator Next Steps\n\n- Re-run /gsd:complete-milestone v1.0\n`
+    );
+
+    const result = runGsdTools('milestone complete v1.0 --name Test', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(state.includes('Phase: Milestone v1.0 complete'));
+    assert.ok(state.includes('Status: Awaiting next milestone'));
+    assert.ok(!state.includes('Re-run /gsd:complete-milestone'));
+    // #3584: persisted ROADMAP/STATE strings now use the runtime-routable
+    // hyphen-form slash command (formatter resolves codex → $gsd-, others → /gsd-).
+    assert.ok(state.includes('/gsd-new-milestone'));
+  });
+
+  test('appends canonical narrative sections when STATE.md headings are missing (#3088)', () => {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), `# Roadmap v1.0\n`);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Status:** In progress\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working\n`
+    );
+
+    const result = runGsdTools('milestone complete v1.0 --name Test', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(state.includes('## Current Position'));
+    assert.ok(state.includes('Phase: Milestone v1.0 complete'));
+    assert.ok(state.includes('## Operator Next Steps'));
+    // #3584: hyphen form is the runtime-routable shape for skills-based installs.
+    assert.ok(state.includes('/gsd-new-milestone'));
   });
 
   test('handles missing ROADMAP.md gracefully', () => {
@@ -823,4 +867,3 @@ describe('new-milestone workflow verification gate', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // validate consistency command
 // ─────────────────────────────────────────────────────────────────────────────
-

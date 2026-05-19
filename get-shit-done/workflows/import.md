@@ -32,7 +32,7 @@ Parse `$ARGUMENTS` to determine the execution mode:
 - If neither flag is found: display usage and exit:
 
 ```
-Usage: /gsd-import --from <path>
+Usage: /gsd:import --from <path>
 
   --from <path>   Import an external plan file into GSD format
 ```
@@ -107,7 +107,7 @@ Extract from the imported content:
 
 <step name="plan_conflict_detection">
 
-Run conflict checks against the loaded project context. Output as a plain-text conflict report using [BLOCKER], [WARNING], and [INFO] labels. Do NOT use markdown tables (no `|---|` format).
+Run conflict checks against the loaded project context. The report format, severity semantics, and safety-gate behavior are defined by `references/doc-conflict-engine.md` — read it and apply it here. Operation noun: `import`.
 
 ### BLOCKER checks (any one prevents import):
 
@@ -128,45 +128,15 @@ Run conflict checks against the loaded project context. Output as a plain-text c
 - Plan uses a library not currently in the project tech stack → [INFO]
 - Plan adds a new phase to the ROADMAP.md structure → [INFO]
 
-Display the full Conflict Detection Report:
+Render the full Conflict Detection Report using the format in `references/doc-conflict-engine.md`.
 
-```
-## Conflict Detection Report
-
-### BLOCKERS ({N})
-
-[BLOCKER] {Short title}
-  Found: {what the imported plan says}
-  Expected: {what project context requires}
-  → {Specific action to resolve}
-
-### WARNINGS ({N})
-
-[WARNING] {Short title}
-  Found: {what was detected}
-  Impact: {what could go wrong}
-  → {Suggested action}
-
-### INFO ({N})
-
-[INFO] {Short title}
-  Note: {relevant information}
-```
-
-**If any [BLOCKER] exists:**
-
-Display:
-```
-GSD > BLOCKED: {N} blockers must be resolved before import can proceed.
-```
-
-Exit WITHOUT writing any files. This is the safety gate — no PLAN.md is written when blockers exist.
+**If any [BLOCKER] exists:** apply the safety gate from the reference — exit WITHOUT writing any files. No PLAN.md is written when blockers exist.
 
 **If only WARNINGS and/or INFO (no blockers):**
 
-
 **Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
-Ask via AskUserQuestion using the approve-revise-abort pattern:
+
+Ask via AskUserQuestion using the approve-revise-abort pattern (see `references/gate-prompts.md`):
 - question: "Review the warnings above. Proceed with import?"
 - header: "Approve?"
 - options: Approve | Abort
@@ -203,15 +173,20 @@ Apply GSD naming convention for the output filename:
 - NEVER use `PLAN-01.md`, `plan-01.md`, or any other format
 - NN = phase number (zero-padded), MM = plan number within the phase (zero-padded)
 
-Determine the target directory:
-```
-.planning/phases/{NN}-{slug}/
+Determine the target directory by querying `init.phase-op` for the phase number extracted in `plan_read_input`. This ensures the `project_code` prefix from `.planning/config.json` is applied:
+
+```bash
+INIT=$(gsd-sdk query init.phase-op "{NN}")
+if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
+expected_phase_dir=$(echo "$INIT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).expected_phase_dir)")
 ```
 
 If the directory does not exist, create it:
 ```bash
-mkdir -p ".planning/phases/{NN}-{slug}/"
+mkdir -p "${expected_phase_dir}"
 ```
+
+Set `phase_dir="${expected_phase_dir}"` for use in subsequent steps.
 
 Write the PLAN.md file to the target directory.
 
@@ -222,11 +197,13 @@ Write the PLAN.md file to the target directory.
 Delegate validation to gsd-plan-checker:
 
 ```
-Task({
+Agent({
   subagent_type: "gsd-plan-checker",
   prompt: "Validate: .planning/phases/{phase}/{plan}-PLAN.md — check frontmatter completeness, task structure, and GSD conventions. Report any issues."
 })
 ```
+
+> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
 If the checker returns errors:
 - Display the errors to the user
@@ -248,7 +225,7 @@ Update `.planning/STATE.md` if appropriate (e.g., increment total plan count).
 
 Commit the imported plan and updated files:
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs({phase}): import plan from {basename FILEPATH}" --files .planning/phases/{phase}/{plan}-PLAN.md .planning/ROADMAP.md
+gsd-sdk query commit "docs({phase}): import plan from {basename FILEPATH}" --files .planning/phases/{phase}/{plan}-PLAN.md .planning/ROADMAP.md
 ```
 
 Display completion:
@@ -267,7 +244,7 @@ Show: plan filename written, phase directory, validation result, next steps.
 ## Anti-Patterns
 
 Do NOT:
-- Use markdown tables (`|---|`) in the conflict detection report — use plain-text [BLOCKER]/[WARNING]/[INFO] labels
+- Violate the shared conflict-engine contract in `references/doc-conflict-engine.md` (no markdown tables, no new severity labels, no bypass of the BLOCKER gate)
 - Write PLAN.md files as `PLAN-01.md` or `plan-01.md` — always use `{NN}-{MM}-PLAN.md`
 - Use `pbr:plan-checker` or `pbr:planner` — use `gsd-plan-checker` and `gsd-planner`
 - Write `.planning/.active-skill` — this is a PBR pattern with no GSD equivalent

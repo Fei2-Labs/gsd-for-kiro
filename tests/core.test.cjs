@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * GSD Tools Tests - core.cjs
  *
@@ -19,9 +24,7 @@ const {
   generateSlugInternal,
   normalizePhaseName,
   reapStaleTempFiles,
-  normalizeMd,
   comparePhaseNum,
-  safeReadFile,
   pathExistsInternal,
   getMilestoneInfo,
   getMilestonePhaseFilter,
@@ -162,15 +165,25 @@ describe('loadConfig', () => {
     const { VALID_CONFIG_KEYS } = require('../get-shit-done/bin/lib/config.cjs');
     // Every top-level key from VALID_CONFIG_KEYS should be recognized
     const topLevelKeys = [...VALID_CONFIG_KEYS].map(k => k.split('.')[0]);
+    // For value-validated keys (e.g. `runtime` enforces an enum at loadConfig
+    // time, see #2517 review finding #10), seed a known-good value so the
+    // value-validation warning doesn't fire — this test only checks that the
+    // key NAME is recognized, not whether the value itself is valid.
+    const KEY_VALID_VALUES = { runtime: 'codex' };
     for (const key of topLevelKeys) {
-      writeConfig({ [key]: 'test-value' });
+      const value = KEY_VALID_VALUES[key] ?? 'test-value';
+      writeConfig({ [key]: value });
       const origWrite = process.stderr.write;
       let stderrOutput = '';
       process.stderr.write = (chunk) => { stderrOutput += chunk; };
       try {
         loadConfig(tmpDir);
+        // Look only for the unknown-KEY warning shape, not any incidental match
+        // (the value-validation warning emitted by #2517 mentions key names too).
+        const unknownKeyWarning = stderrOutput.includes('unknown config key(s)') &&
+          stderrOutput.includes(key);
         assert.ok(
-          !stderrOutput.includes(key),
+          !unknownKeyWarning,
           `VALID_CONFIG_KEYS key "${key}" should not trigger unknown-key warning`
         );
       } finally {
@@ -187,6 +200,103 @@ describe('loadConfig', () => {
     t.after(() => { process.stderr.write = origWrite; });
     loadConfig(tmpDir);
     assert.strictEqual(stderrOutput, '', 'should not emit any warnings for valid config');
+  });
+});
+
+// ─── loadConfig workstream config inheritance (#2714) ────────────────────────
+
+describe('loadConfig workstream config inheritance (#2714)', () => {
+  let tmpDir;
+  let originalEnv;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+    originalEnv = process.env.GSD_WORKSTREAM;
+    delete process.env.GSD_WORKSTREAM;
+  });
+
+  afterEach(() => {
+    if (originalEnv !== undefined) {
+      process.env.GSD_WORKSTREAM = originalEnv;
+    } else {
+      delete process.env.GSD_WORKSTREAM;
+    }
+    cleanup(tmpDir);
+  });
+
+  function writeRootConfig(obj) {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify(obj, null, 2)
+    );
+  }
+
+  function writeWorkstreamConfig(wsName, obj) {
+    const wsDir = path.join(tmpDir, '.planning', 'workstreams', wsName);
+    fs.mkdirSync(wsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(wsDir, 'config.json'),
+      JSON.stringify(obj, null, 2)
+    );
+  }
+
+  test('workstream config inherits model_overrides from root when not defined in workstream', () => {
+    writeRootConfig({ model_overrides: { 'gsd-executor': 'opus' } });
+    writeWorkstreamConfig('feature-a', { model_profile: 'quality' });
+    process.env.GSD_WORKSTREAM = 'feature-a';
+    const config = loadConfig(tmpDir);
+    assert.deepStrictEqual(config.model_overrides, { 'gsd-executor': 'opus' });
+    assert.strictEqual(config.model_profile, 'quality');
+  });
+
+  test('workstream-specific keys override root config values', () => {
+    writeRootConfig({ model_profile: 'balanced', model_overrides: { 'gsd-executor': 'opus' } });
+    writeWorkstreamConfig('feature-b', { model_profile: 'speed', model_overrides: { 'gsd-executor': 'haiku' } });
+    process.env.GSD_WORKSTREAM = 'feature-b';
+    const config = loadConfig(tmpDir);
+    assert.strictEqual(config.model_profile, 'speed');
+    assert.deepStrictEqual(config.model_overrides, { 'gsd-executor': 'haiku' });
+  });
+
+  test('deep merge works for nested workflow.* keys', () => {
+    writeRootConfig({ workflow: { research: false, auto_advance: true } });
+    writeWorkstreamConfig('feature-c', { workflow: { auto_advance: false } });
+    process.env.GSD_WORKSTREAM = 'feature-c';
+    const config = loadConfig(tmpDir);
+    // research inherited from root
+    assert.strictEqual(config.research, false);
+    // auto_advance overridden by workstream
+    assert.strictEqual(config.auto_advance, false);
+  });
+
+  test('explicit null in workstream config overrides root value (PR #2717 null-override bug)', () => {
+    writeRootConfig({ model_overrides: { 'gsd-executor': 'opus', 'gsd-planner': 'sonnet' } });
+    writeWorkstreamConfig('feature-d', { model_overrides: null });
+    process.env.GSD_WORKSTREAM = 'feature-d';
+    const config = loadConfig(tmpDir);
+    // null in workstream should override root, not fall back to root value
+    assert.strictEqual(config.model_overrides, null);
+  });
+
+  test('workstream without config.json inherits root config', () => {
+    writeRootConfig({ model_profile: 'quality', model_overrides: { 'gsd-executor': 'opus' } });
+    // Create workstream dir without config.json
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'workstreams', 'feature-e'), { recursive: true });
+    process.env.GSD_WORKSTREAM = 'feature-e';
+    const config = loadConfig(tmpDir);
+    assert.strictEqual(config.model_profile, 'quality');
+    assert.deepStrictEqual(config.model_overrides, { 'gsd-executor': 'opus' });
+  });
+
+  test('loadConfig does not mutate GSD_WORKSTREAM when workstream config is missing', () => {
+    writeRootConfig({ model_profile: 'quality' });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'workstreams', 'feature-f'), { recursive: true });
+    process.env.GSD_WORKSTREAM = 'feature-f';
+
+    const config = loadConfig(tmpDir);
+
+    assert.strictEqual(config.model_profile, 'quality');
+    assert.strictEqual(process.env.GSD_WORKSTREAM, 'feature-f');
   });
 });
 
@@ -333,9 +443,19 @@ describe('resolveModelInternal', () => {
       assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'sonnet');
     });
 
-    test('returns sonnet for unknown agent type even with inherit profile', () => {
+    test('returns opus for unknown agent type with quality profile', () => {
+      writeConfig({ model_profile: 'quality' });
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'opus');
+    });
+
+    test('returns haiku for unknown agent type with budget profile', () => {
+      writeConfig({ model_profile: 'budget' });
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'haiku');
+    });
+
+    test('returns inherit for unknown agent type with inherit profile', () => {
       writeConfig({ model_profile: 'inherit' });
-      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'sonnet');
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'inherit');
     });
 
     test('defaults to balanced profile when model_profile missing', () => {
@@ -367,6 +487,24 @@ describe('resolveModelInternal', () => {
     test('returns empty string with inherit profile', () => {
       writeConfig({ resolve_model_ids: 'omit', model_profile: 'inherit' });
       assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-planner'), '');
+    });
+  });
+
+  describe('resolve_model_ids: true', () => {
+    // Regression test for #2712: MODEL_ALIAS_MAP must track current model releases.
+    test('opus alias resolves to claude-opus-4-7', () => {
+      writeConfig({ resolve_model_ids: true, model_profile: 'quality' });
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-planner'), 'claude-opus-4-7');
+    });
+
+    test('sonnet alias resolves to claude-sonnet-4-6', () => {
+      writeConfig({ resolve_model_ids: true, model_profile: 'balanced' });
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-executor'), 'claude-sonnet-4-6');
+    });
+
+    test('haiku alias resolves to claude-haiku-4-5', () => {
+      writeConfig({ resolve_model_ids: true, model_profile: 'budget' });
+      assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-codebase-mapper'), 'claude-haiku-4-5');
     });
   });
 });
@@ -447,30 +585,6 @@ describe('generateSlugInternal', () => {
 // phase.test.cjs (which covers all edge cases: hybrid, letter-suffix,
 // multi-level decimal, case-insensitive, directory-slug, and full sort order).
 // Removed duplicates here to keep a single authoritative test location.
-
-// ─── safeReadFile ──────────────────────────────────────────────────────────────
-
-describe('safeReadFile', () => {
-  let tmpDir;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-core-test-'));
-  });
-
-  afterEach(() => {
-    cleanup(tmpDir);
-  });
-
-  test('reads existing file', () => {
-    const filePath = path.join(tmpDir, 'test.txt');
-    fs.writeFileSync(filePath, 'hello world');
-    assert.strictEqual(safeReadFile(filePath), 'hello world');
-  });
-
-  test('returns null for missing file', () => {
-    assert.strictEqual(safeReadFile('/nonexistent/path/file.txt'), null);
-  });
-});
 
 // ─── pathExistsInternal ────────────────────────────────────────────────────────
 
@@ -600,6 +714,108 @@ describe('getMilestoneInfo', () => {
     assert.strictEqual(info.version, 'v1.0');
     assert.strictEqual(info.name, 'milestone');
   });
+
+  // Bug #2409: getMilestoneInfo must prefer STATE.md milestone: field over regex matching
+  test('uses STATE.md milestone frontmatter when 🚧 is inside <summary> tag without bold (bug #2409)', () => {
+    // STATE.md says v2.9, ROADMAP has 🚧 v2.9 inside <summary> (not bolded) — no bold regex match
+    const roadmap = [
+      '# Milestones',
+      '',
+      '- ✅ v2.2 Old Features — shipped 2026-04-03',
+      '- 🚧 v2.9 Full-Pass Verification',
+      '',
+      '<details>',
+      '<summary>🚧 v2.9 Full-Pass Verification & Bug Fixing — IN PROGRESS</summary>',
+      '',
+      '## Roadmap v2.9: Full-Pass Verification & Bug Fixing',
+      '',
+      '### Phase 1: Verification',
+      '',
+      '</details>',
+      '',
+      '## Phase Details (v2.2 — Old Features)',
+      '',
+      '### Phase 1: Old Stuff',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v2.9\n---\n\n# State\n'
+    );
+
+    const info = getMilestoneInfo(tmpDir);
+    assert.strictEqual(info.version, 'v2.9',
+      'should return v2.9 from STATE.md, not v2.2 from a stale heading match');
+    assert.ok(info.name.includes('Full-Pass') || info.name.includes('Verification'),
+      `name should reference the v2.9 milestone, got: "${info.name}"`);
+  });
+
+  test('STATE.md milestone takes precedence over first ## heading match (bug #2409)', () => {
+    // ROADMAP with multiple ## headings — without STATE.md anchoring, first match wins
+    const roadmap = [
+      '## Phase Details (v1.5–v2.1)',
+      '',
+      '## Roadmap v2.2: Old Milestone',
+      '',
+      '## Roadmap v2.9: Current Milestone',
+      '',
+      '### Phase 1: Alpha',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v2.9\n---\n\n# State\n'
+    );
+
+    const info = getMilestoneInfo(tmpDir);
+    assert.strictEqual(info.version, 'v2.9',
+      'should read v2.9 from STATE.md, not v2.2 from first ## heading');
+    assert.strictEqual(info.name, 'Current Milestone');
+  });
+
+  // Bug found in code review of PR #2458: stateVersion early-return doesn't check if shipped
+  test('falls through to new active milestone when STATE.md version is already shipped (✅ heading)', () => {
+    // STATE.md still says v1.0 (stale), but v1.0 is marked ✅ in ROADMAP.md.
+    // getMilestoneInfo must NOT return v1.0; it must fall through and detect v2.0.
+    const roadmap = [
+      '## v1.0 ✅ Initial Release: Done',
+      '',
+      '### Phase 1: Setup',
+      '',
+      '## v2.0: Active Milestone',
+      '',
+      '### Phase 2: Build',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v1.0\n---\n\n# State\n'
+    );
+
+    const info = getMilestoneInfo(tmpDir);
+    assert.strictEqual(info.version, 'v2.0',
+      'should return v2.0 (active milestone), not v1.0 (stale shipped milestone from STATE.md)');
+    assert.strictEqual(info.name, 'Active Milestone');
+  });
+
+  test('falls through when STATE.md version matches ✅ heading in alternate position formats', () => {
+    // ✅ can appear before the version: ## ✅ v1.0 Old Name
+    const roadmap = [
+      '## ✅ v1.0 Old Name',
+      '',
+      '## v2.0: New Stuff',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v1.0\n---\n\n# State\n'
+    );
+
+    const info = getMilestoneInfo(tmpDir);
+    assert.strictEqual(info.version, 'v2.0',
+      'should return v2.0, not stale v1.0 with ✅ prefix in heading');
+    assert.strictEqual(info.name, 'New Stuff');
+  });
 });
 
 // ─── searchPhaseInDir ──────────────────────────────────────────────────────────
@@ -646,6 +862,16 @@ describe('searchPhaseInDir', () => {
     const result = searchPhaseInDir(phasesDir, '.planning/phases', '01');
     assert.strictEqual(result.incomplete_plans.length, 1);
     assert.ok(result.incomplete_plans.includes('01-02-PLAN.md'));
+  });
+
+  test('treats prefix summary as complete for descriptive plan filename (#3101)', () => {
+    const phaseDir = path.join(phasesDir, '01-foundation');
+    fs.mkdirSync(phaseDir);
+    fs.writeFileSync(path.join(phaseDir, '01-01-auth-hardening-PLAN.md'), '# Plan 1');
+    fs.writeFileSync(path.join(phaseDir, '01-01-SUMMARY.md'), '# Summary 1');
+
+    const result = searchPhaseInDir(phasesDir, '.planning/phases', '01');
+    assert.strictEqual(result.incomplete_plans.length, 0);
   });
 
   test('detects research and context files', () => {
@@ -790,6 +1016,41 @@ describe('getRoadmapPhaseInternal', () => {
     // Should not include Phase 2 content
     assert.ok(!result.section.includes('Phase 2: API'));
   });
+
+  // Bug #2391: zero-padded phase numbers ("03") must match unpadded ROADMAP headings ("Phase 3:")
+  test('matches zero-padded phase number against unpadded ROADMAP heading (bug #2391)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '### Phase 3: Rotation Engine\n**Goal**: Build rotation\n**Requirements**: ROTA-01\n'
+    );
+    const result = getRoadmapPhaseInternal(tmpDir, '03');
+    assert.ok(result !== null, 'should find the phase with zero-padded input "03"');
+    assert.strictEqual(result.found, true);
+    assert.strictEqual(result.phase_name, 'Rotation Engine');
+    assert.strictEqual(result.goal, 'Build rotation');
+  });
+
+  test('matches double-zero-padded phase number against unpadded ROADMAP heading (bug #2391)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '### Phase 7: Final\n**Goal**: Ship it\n'
+    );
+    const result = getRoadmapPhaseInternal(tmpDir, '007');
+    assert.ok(result !== null, 'should find the phase with "007"');
+    assert.strictEqual(result.found, true);
+    assert.strictEqual(result.phase_name, 'Final');
+  });
+
+  test('unpadded lookup still works after fix (regression check)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '### Phase 3: Rotation Engine\n**Goal**: Build rotation\n'
+    );
+    const result = getRoadmapPhaseInternal(tmpDir, '3');
+    assert.ok(result !== null);
+    assert.strictEqual(result.found, true);
+    assert.strictEqual(result.phase_name, 'Rotation Engine');
+  });
 });
 
 // ─── getMilestonePhaseFilter ────────────────────────────────────────────────────
@@ -923,115 +1184,6 @@ describe('getMilestonePhaseFilter', () => {
 
     const filter = getMilestonePhaseFilter(tmpDir);
     assert.strictEqual(filter.phaseCount, 0);
-  });
-});
-
-// ─── normalizeMd ─────────────────────────────────────────────────────────────
-
-describe('normalizeMd', () => {
-  test('returns null/undefined/empty unchanged', () => {
-    assert.strictEqual(normalizeMd(null), null);
-    assert.strictEqual(normalizeMd(undefined), undefined);
-    assert.strictEqual(normalizeMd(''), '');
-  });
-
-  test('MD022: adds blank lines around headings', () => {
-    const input = 'Some text\n## Heading\nMore text\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('\n\n## Heading\n\n'), 'heading should have blank lines around it');
-  });
-
-  test('MD032: adds blank line before list after non-list content', () => {
-    const input = 'Some text\n- item 1\n- item 2\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('Some text\n\n- item 1'), 'list should have blank line before it');
-  });
-
-  test('MD032: adds blank line after list before non-list content', () => {
-    const input = '- item 1\n- item 2\nSome text\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('- item 2\n\nSome text'), 'list should have blank line after it');
-  });
-
-  test('MD032: does not add extra blank lines between list items', () => {
-    const input = '- item 1\n- item 2\n- item 3\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('- item 1\n- item 2\n- item 3'), 'consecutive list items should not get blank lines');
-  });
-
-  test('MD031: adds blank lines around fenced code blocks', () => {
-    const input = 'Some text\n```js\ncode\n```\nMore text\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('Some text\n\n```js'), 'code block should have blank line before');
-    assert.ok(result.includes('```\n\nMore text'), 'code block should have blank line after');
-  });
-
-  test('MD012: collapses 3+ consecutive blank lines to 2', () => {
-    const input = 'Line 1\n\n\n\n\nLine 2\n';
-    const result = normalizeMd(input);
-    assert.ok(!result.includes('\n\n\n'), 'should not have 3+ consecutive blank lines');
-    assert.ok(result.includes('Line 1\n\nLine 2'), 'should collapse to double newline');
-  });
-
-  test('MD047: ensures file ends with single newline', () => {
-    const input = 'Content';
-    const result = normalizeMd(input);
-    assert.ok(result.endsWith('\n'), 'should end with newline');
-    assert.ok(!result.endsWith('\n\n'), 'should not end with double newline');
-  });
-
-  test('MD047: trims trailing multiple newlines', () => {
-    const input = 'Content\n\n\n';
-    const result = normalizeMd(input);
-    assert.ok(result.endsWith('Content\n'), 'should end with single newline after content');
-  });
-
-  test('preserves frontmatter delimiters', () => {
-    const input = '---\nkey: value\n---\n\n# Heading\n\nContent\n';
-    const result = normalizeMd(input);
-    assert.ok(result.startsWith('---\n'), 'should preserve opening frontmatter');
-    assert.ok(result.includes('---\n\n# Heading'), 'should preserve frontmatter closing');
-  });
-
-  test('handles CRLF line endings', () => {
-    const input = 'Some text\r\n## Heading\r\nMore text\r\n';
-    const result = normalizeMd(input);
-    assert.ok(!result.includes('\r'), 'should normalize to LF');
-    assert.ok(result.includes('\n\n## Heading\n\n'), 'should add blank lines around heading');
-  });
-
-  test('handles ordered lists', () => {
-    const input = 'Some text\n1. First\n2. Second\nMore text\n';
-    const result = normalizeMd(input);
-    assert.ok(result.includes('Some text\n\n1. First'), 'ordered list should have blank line before');
-  });
-
-  test('does not add blank line between table and list', () => {
-    const input = '| Col |\n|-----|\n| val |\n- item\n';
-    const result = normalizeMd(input);
-    // Table rows start with |, should not add extra blank before list after table
-    assert.ok(result.includes('| val |\n\n- item'), 'list after table should have blank line');
-  });
-
-  test('complex real-world STATE.md-like content', () => {
-    const input = [
-      '# Project State',
-      '## Current Position',
-      'Phase: 5 of 10',
-      'Status: Executing',
-      '## Decisions',
-      '- Decision 1',
-      '- Decision 2',
-      '## Blockers',
-      'None',
-    ].join('\n');
-    const result = normalizeMd(input);
-    // Every heading should have blank lines around it
-    assert.ok(result.includes('\n\n## Current Position\n\n'), 'section heading needs blank lines');
-    assert.ok(result.includes('\n\n## Decisions\n\n'), 'decisions heading needs blank lines');
-    assert.ok(result.includes('\n\n## Blockers\n\n'), 'blockers heading needs blank lines');
-    // List should have blank line before it
-    assert.ok(result.includes('\n\n- Decision 1'), 'list needs blank line before');
   });
 });
 
@@ -1372,9 +1524,10 @@ describe('loadConfig sub_repos auto-sync', () => {
     assert.deepStrictEqual(config.sub_repos, ['backend', 'frontend']);
     assert.strictEqual(config.commit_docs, false);
 
-    // Verify config was persisted
+    // Verify config was persisted to the canonical location (planning.sub_repos per #2561/#2638)
     const saved = JSON.parse(fs.readFileSync(path.join(projectRoot, '.planning', 'config.json'), 'utf-8'));
-    assert.deepStrictEqual(saved.sub_repos, ['backend', 'frontend']);
+    assert.deepStrictEqual(saved.planning?.sub_repos, ['backend', 'frontend']);
+    assert.strictEqual(saved.sub_repos, undefined, 'top-level sub_repos should not be written (#2638)');
     assert.strictEqual(saved.multiRepo, undefined, 'multiRepo should be removed');
   });
 

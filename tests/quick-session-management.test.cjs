@@ -1,5 +1,9 @@
 'use strict';
 
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -57,8 +61,8 @@ describe('quick session management (#2155)', () => {
 
   test('quick command list uses frontmatter get for status', () => {
     assert.ok(
-      quickCmd.includes('frontmatter get'),
-      'list should use frontmatter get to read status'
+      quickCmd.includes('frontmatter get') || quickCmd.includes('frontmatter.get'),
+      'list should use frontmatter get / frontmatter.get to read status'
     );
   });
 

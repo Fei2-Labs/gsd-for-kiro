@@ -1,3 +1,8 @@
+// allow-test-rule: docs-parity
+// Extracts CONFIG_DEFAULTS keys from core.cjs source to verify planning-config.md
+// stays in sync. The canonical list of defaults lives in source; there is no runtime
+// API to enumerate them. Source inspection is the only practical parity check here.
+
 /**
  * Verify planning-config.md documents all config fields from source code.
  */
@@ -80,6 +85,9 @@ describe('config-field-docs', () => {
       phase_branch_template: 'git.phase_branch_template',
       milestone_branch_template: 'git.milestone_branch_template',
       quick_branch_template: 'git.quick_branch_template',
+      security_enforcement: 'workflow.security_enforcement',
+      security_asvs_level: 'workflow.security_asvs_level',
+      security_block_on: 'workflow.security_block_on',
     };
 
     const missing = keys.filter(k => {

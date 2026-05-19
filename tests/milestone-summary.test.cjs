@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * GSD Milestone Summary Tests
  *
@@ -107,8 +112,8 @@ describe('milestone-summary workflow', () => {
   test('workflow updates STATE.md', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(
-      content.includes('state record-session'),
-      'should update STATE.md via gsd-tools'
+      content.includes('state record-session') || content.includes('state.record-session'),
+      'should update STATE.md via state record-session (CJS or gsd-sdk query)'
     );
   });
 

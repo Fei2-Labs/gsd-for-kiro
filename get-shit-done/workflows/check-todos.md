@@ -12,7 +12,7 @@ Read all files referenced by the invoking prompt's execution_context before star
 Load todo context:
 
 ```bash
-INIT=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" init todos)
+INIT=$(gsd-sdk query init.todos)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
@@ -28,7 +28,7 @@ Todos are captured during work sessions with /gsd-add-todo.
 
 Would you like to:
 
-1. Continue with current phase (/gsd-progress)
+1. Continue with current phase (/gsd:progress)
 2. Add a todo now (/gsd-add-todo)
 ```
 
@@ -37,8 +37,8 @@ Exit.
 
 <step name="parse_filter">
 Check for area filter in arguments:
-- `/gsd-check-todos` → show all
-- `/gsd-check-todos api` → filter to area:api only
+- `/gsd:capture --list` → show all
+- `/gsd:capture --list api` → filter to area:api only
 </step>
 
 <step name="list_todos">
@@ -56,7 +56,7 @@ Pending Todos:
 ---
 
 Reply with a number to view details, or:
-- `/gsd-check-todos [area]` to filter by area
+- `/gsd:capture --list [area]` to filter by area
 - `q` to exit
 ```
 
@@ -157,7 +157,7 @@ If todo was moved to done/, commit the change:
 
 ```bash
 git rm --cached .planning/todos/pending/[filename] 2>/dev/null || true
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs: start work on todo - [title]" --files .planning/todos/completed/[filename] .planning/STATE.md
+gsd-sdk query commit "docs: start work on todo - [title]" --files .planning/todos/completed/[filename] .planning/STATE.md
 ```
 
 Tool respects `commit_docs` config and gitignore automatically.

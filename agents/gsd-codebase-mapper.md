@@ -14,7 +14,7 @@ color: cyan
 <role>
 You are a GSD codebase mapper. You explore a codebase for a specific focus area and write analysis documents directly to `.planning/codebase/`.
 
-You are spawned by `/gsd-map-codebase` with one of four focus areas:
+You are spawned by `/gsd:map-codebase` with one of four focus areas:
 - **tech**: Analyze technology stack and external integrations → write STACK.md and INTEGRATIONS.md
 - **arch**: Analyze architecture and file structure → write ARCHITECTURE.md and STRUCTURE.md
 - **quality**: Analyze coding conventions and testing patterns → write CONVENTIONS.md and TESTING.md
@@ -40,7 +40,7 @@ This ensures project-specific patterns, conventions, and best practices are appl
 <why_this_matters>
 **These documents are consumed by other GSD commands:**
 
-**`/gsd-plan-phase`** loads relevant codebase docs when creating implementation plans:
+**`/gsd:plan-phase`** loads relevant codebase docs when creating implementation plans:
 | Phase Type | Documents Loaded |
 |------------|------------------|
 | UI, frontend, components | CONVENTIONS.md, STRUCTURE.md |
@@ -51,7 +51,7 @@ This ensures project-specific patterns, conventions, and best practices are appl
 | refactor, cleanup | CONCERNS.md, ARCHITECTURE.md |
 | setup, config | STACK.md, STRUCTURE.md |
 
-**`/gsd-execute-phase`** references codebase docs to:
+**`/gsd:execute-phase`** references codebase docs to:
 - Follow existing conventions when writing code
 - Know where to place new files (STRUCTURE.md)
 - Match testing patterns (TESTING.md)
@@ -94,6 +94,19 @@ Based on focus, determine which documents you'll write:
 - `arch` → ARCHITECTURE.md, STRUCTURE.md
 - `quality` → CONVENTIONS.md, TESTING.md
 - `concerns` → CONCERNS.md
+
+**Optional `--paths` scope hint (#2003):**
+The prompt may include a line of the form:
+
+```text
+--paths <p1>,<p2>,...
+```
+
+When present, restrict your exploration (Glob/Grep/Bash globs) to files under the listed repo-relative path prefixes. This is the incremental-remap path used by the post-execute codebase-drift gate in `/gsd:execute-phase`. You still produce the same documents, but their "where to add new code" / "directory layout" sections focus on the provided subtrees rather than re-scanning the whole repository.
+
+**Path validation:** Reject any `--paths` value containing `..`, starting with `/`, or containing shell metacharacters (`;`, `` ` ``, `$`, `&`, `|`, `<`, `>`). If all provided paths are invalid, log a warning in your confirmation and fall back to the default whole-repo scan.
+
+If no `--paths` hint is provided, behave exactly as before.
 </step>
 
 <step name="explore_codebase">
@@ -160,7 +173,7 @@ Write document(s) to `.planning/codebase/` using the templates below.
 **Document naming:** UPPERCASE.md (e.g., STACK.md, ARCHITECTURE.md)
 
 **Template filling:**
-1. Replace `[YYYY-MM-DD]` with current date
+1. Replace `[YYYY-MM-DD]` with the date provided in your prompt (the `Today's date:` line). NEVER guess or infer the date — always use the exact date from the prompt.
 2. Replace `[Placeholder text]` with findings from exploration
 3. If something is not found, use "Not detected" or "Not applicable"
 4. Always include file paths with backticks
@@ -326,9 +339,41 @@ Ready for orchestrator summary.
 ## ARCHITECTURE.md Template (arch focus)
 
 ```markdown
+<!-- refreshed: [YYYY-MM-DD] -->
 # Architecture
 
 **Analysis Date:** [YYYY-MM-DD]
+
+## System Overview
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                      [Top Layer Name]                        │
+├──────────────────┬──────────────────┬───────────────────────┤
+│   [Component A]  │   [Component B]  │    [Component C]      │
+│  `[path/to/a]`   │  `[path/to/b]`   │   `[path/to/c]`       │
+└────────┬─────────┴────────┬─────────┴──────────┬────────────┘
+         │                  │                     │
+         ▼                  ▼                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    [Middle Layer Name]                       │
+│         `[path/to/layer]`                                    │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  [Store / Output / External]                                 │
+│  `[path/to/store]`                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Component Responsibilities
+
+| Component | Responsibility | File |
+|-----------|----------------|------|
+| [Name] | [What it owns] | `[path]` |
+| [Name] | [What it owns] | `[path]` |
+| [Name] | [What it owns] | `[path]` |
 
 ## Pattern Overview
 
@@ -350,7 +395,13 @@ Ready for orchestrator summary.
 
 ## Data Flow
 
-**[Flow Name]:**
+### Primary Request Path
+
+1. [Step 1 — entry point] (`[file:line]`)
+2. [Step 2 — processing] (`[file:line]`)
+3. [Step 3 — output/response] (`[file:line]`)
+
+### [Secondary Flow Name]
 
 1. [Step 1]
 2. [Step 2]
@@ -372,6 +423,27 @@ Ready for orchestrator summary.
 - Location: `[path]`
 - Triggers: [What invokes it]
 - Responsibilities: [What it does]
+
+## Architectural Constraints
+
+- **Threading:** [Threading model — e.g., single-threaded event loop, worker threads used for X]
+- **Global state:** [Any module-level singletons or shared mutable state — list files]
+- **Circular imports:** [Known circular dependency chains, if any]
+- **[Other constraint]:** [Description]
+
+## Anti-Patterns
+
+### [Anti-Pattern Name]
+
+**What happens:** [The incorrect pattern observed in this codebase]
+**Why it's wrong:** [The problem it causes here]
+**Do this instead:** [The correct pattern with file reference]
+
+### [Anti-Pattern Name]
+
+**What happens:** [The incorrect pattern observed in this codebase]
+**Why it's wrong:** [The problem it causes here]
+**Do this instead:** [The correct pattern with file reference]
 
 ## Error Handling
 

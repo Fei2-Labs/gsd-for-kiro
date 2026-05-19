@@ -20,7 +20,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { GSDError, ErrorClassification } from '../errors.js';
 import { extractFrontmatter } from './frontmatter.js';
-import { normalizeMd, resolvePathUnderProject } from './helpers.js';
+import { normalizeMd, resolveFrontmatterPath } from './helpers.js';
 import type { QueryHandler } from './utils.js';
 
 // ─── FRONTMATTER_SCHEMAS ──────────────────────────────────────────────────
@@ -164,9 +164,25 @@ function parseSimpleValue(value: string): unknown {
  * @returns QueryResult with { updated: true, field, value }
  */
 export const frontmatterSet: QueryHandler = async (args, projectDir) => {
-  const filePath = args[0];
-  const field = args[1];
-  const value = args[2];
+  let filePath: string;
+  let field: string;
+  let value: string;
+
+  const fi = args.indexOf('--field');
+  const vi = args.indexOf('--value');
+  const hasNamedArgs = fi !== -1 || vi !== -1;
+  if (hasNamedArgs) {
+    if (fi === -1 || vi === -1 || !args[fi + 1] || args[vi + 1] === undefined) {
+      throw new GSDError('file, --field, and --value required together', ErrorClassification.Validation);
+    }
+    filePath = args[0];
+    field = args[fi + 1];
+    value = args[vi + 1];
+  } else {
+    filePath = args[0];
+    field = args[1];
+    value = args[2];
+  }
 
   if (!filePath || !field || value === undefined) {
     throw new GSDError('file, field, and value required', ErrorClassification.Validation);
@@ -177,15 +193,10 @@ export const frontmatterSet: QueryHandler = async (args, projectDir) => {
     throw new GSDError('file path contains null bytes', ErrorClassification.Validation);
   }
 
-  let fullPath: string;
-  try {
-    fullPath = await resolvePathUnderProject(projectDir, filePath);
-  } catch (err) {
-    if (err instanceof GSDError) {
-      return { data: { error: err.message, path: filePath } };
-    }
-    throw err;
-  }
+  // CJS parity (frontmatter.cjs:340/354/369): no project-root prefix check.
+  // Bug #3509 — accept absolute paths outside the project (tmpdirs whose
+  // names include spaces fail the under-project test on macOS).
+  const fullPath = resolveFrontmatterPath(projectDir, filePath);
 
   let content: string;
   try {
@@ -195,11 +206,12 @@ export const frontmatterSet: QueryHandler = async (args, projectDir) => {
   }
 
   const fm = extractFrontmatter(content);
-  fm[field] = parseSimpleValue(value);
+  const parsedValue = parseSimpleValue(value);
+  fm[field] = parsedValue;
   const newContent = spliceFrontmatter(content, fm);
   await writeFile(fullPath, normalizeMd(newContent), 'utf-8');
 
-  return { data: { updated: true, field, value: fm[field] } };
+  return { data: { updated: true, field, value: parsedValue } };
 };
 
 // ─── frontmatterMerge ──────────────────────────────────────────────────────
@@ -210,13 +222,14 @@ export const frontmatterSet: QueryHandler = async (args, projectDir) => {
  * Reads a file, merges JSON object into existing frontmatter, writes back.
  * Port of `cmdFrontmatterMerge` from frontmatter.cjs lines 344-356.
  *
- * @param args - args[0]: file path, args[1]: JSON string
+ * @param args - `file --data <json>` (gsd-tools) or `[file, jsonString]` (SDK)
  * @param projectDir - Project root directory
  * @returns QueryResult with { merged: true, fields: [...] }
  */
 export const frontmatterMerge: QueryHandler = async (args, projectDir) => {
   const filePath = args[0];
-  const jsonString = args[1];
+  const dataIdx = args.indexOf('--data');
+  const jsonString = dataIdx !== -1 ? args[dataIdx + 1] : args[1];
 
   if (!filePath || !jsonString) {
     throw new GSDError('file and data required', ErrorClassification.Validation);
@@ -227,15 +240,10 @@ export const frontmatterMerge: QueryHandler = async (args, projectDir) => {
     throw new GSDError('file path contains null bytes', ErrorClassification.Validation);
   }
 
-  let fullPath: string;
-  try {
-    fullPath = await resolvePathUnderProject(projectDir, filePath);
-  } catch (err) {
-    if (err instanceof GSDError) {
-      return { data: { error: err.message, path: filePath } };
-    }
-    throw err;
-  }
+  // CJS parity (frontmatter.cjs:340/354/369): no project-root prefix check.
+  // Bug #3509 — accept absolute paths outside the project (tmpdirs whose
+  // names include spaces fail the under-project test on macOS).
+  const fullPath = resolveFrontmatterPath(projectDir, filePath);
 
   let content: string;
   try {
@@ -300,15 +308,10 @@ export const frontmatterValidate: QueryHandler = async (args, projectDir) => {
     );
   }
 
-  let fullPath: string;
-  try {
-    fullPath = await resolvePathUnderProject(projectDir, filePath);
-  } catch (err) {
-    if (err instanceof GSDError) {
-      return { data: { error: err.message, path: filePath } };
-    }
-    throw err;
-  }
+  // CJS parity (frontmatter.cjs:340/354/369): no project-root prefix check.
+  // Bug #3509 — accept absolute paths outside the project (tmpdirs whose
+  // names include spaces fail the under-project test on macOS).
+  const fullPath = resolveFrontmatterPath(projectDir, filePath);
 
   let content: string;
   try {

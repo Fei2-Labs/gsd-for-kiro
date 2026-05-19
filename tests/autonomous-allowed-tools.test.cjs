@@ -12,13 +12,16 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
+// allow-test-rule: source-text-is-the-product
+// commands/gsd/autonomous.md is the installed command — its frontmatter is what Claude Code
+// reads at runtime to enforce allowed-tools. Checking text content IS checking the contract.
 describe('commands/gsd/autonomous.md allowed-tools', () => {
   test('includes Agent in allowed-tools list', () => {
     const filePath = path.join(__dirname, '..', 'commands', 'gsd', 'autonomous.md');
     const content = fs.readFileSync(filePath, 'utf-8');
 
     // Extract the YAML frontmatter block between the first pair of --- delimiters
-    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     assert.ok(frontmatterMatch, 'autonomous.md must have YAML frontmatter');
 
     const frontmatter = frontmatterMatch[1];

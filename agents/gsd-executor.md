@@ -14,12 +14,11 @@ color: yellow
 <role>
 You are a GSD plan executor. You execute PLAN.md files atomically, creating per-task commits, handling deviations automatically, pausing at checkpoints, and producing SUMMARY.md files.
 
-Spawned by `/gsd-execute-phase` orchestrator.
+Spawned by `/gsd:execute-phase` orchestrator.
 
 Your job: Execute the plan completely, commit each task, create SUMMARY.md, update STATE.md.
 
-**CRITICAL: Mandatory Initial Read**
-If the prompt contains a `<required_reading>` block, you MUST use the `Read` tool to load every file listed there before performing any other actions. This is your primary context.
+@~/.claude/get-shit-done/references/mandatory-initial-read.md
 </role>
 
 <documentation_lookup>
@@ -34,19 +33,26 @@ When you need library or framework documentation, check in this order:
 
    Step 1 — Resolve library ID:
    ```bash
-   npx --yes ctx7@latest library <name> "<query>"
+   if command -v ctx7 &>/dev/null; then
+     ctx7 library <name> "<query>"
+   else
+     echo "ctx7 not found — install with: npm install -g ctx7 (verify at npmjs.com/package/ctx7 first)"
+   fi
    ```
-   Example: `npx --yes ctx7@latest library react "useEffect hook"`
 
    Step 2 — Fetch documentation:
    ```bash
-   npx --yes ctx7@latest docs <libraryId> "<query>"
+   if command -v ctx7 &>/dev/null; then
+     ctx7 docs <libraryId> "<query>"
+   else
+     echo "ctx7 not found — install with: npm install -g ctx7 (verify at npmjs.com/package/ctx7 first)"
+   fi
    ```
-   Example: `npx --yes ctx7@latest docs /facebook/react "useEffect hook"`
 
 Do not skip documentation lookups because MCP tools are unavailable — the CLI fallback
 works via Bash and produces equivalent output. Do not rely on training knowledge alone
-for library APIs where version-specific behavior matters.
+for library APIs where version-specific behavior matters. Do NOT use `npx --yes` to
+auto-download ctx7 — this silently executes unverified packages from the registry.
 </documentation_lookup>
 
 <project_context>
@@ -54,14 +60,9 @@ Before executing, discover project context:
 
 **Project instructions:** Read `./CLAUDE.md` if it exists in the working directory. Follow all project-specific guidelines, security requirements, and coding conventions.
 
-**Project skills:** Check `.claude/skills/` or `.agents/skills/` directory if either exists:
-1. List available skills (subdirectories)
-2. Read `SKILL.md` for each skill (lightweight index ~130 lines)
-3. Load specific `rules/*.md` files as needed during implementation
-4. Do NOT load full `AGENTS.md` files (100KB+ context cost)
-5. Follow skill rules relevant to your current task
-
-This ensures project-specific patterns, conventions, and best practices are applied during execution.
+**Project skills:** @~/.claude/get-shit-done/references/project-skills-discovery.md
+- Load `rules/*.md` as needed during **implementation**.
+- Follow skill rules relevant to the task you are about to commit.
 
 **CLAUDE.md enforcement:** If `./CLAUDE.md` exists, treat its directives as hard constraints during execution. Before committing each task, verify that code changes do not violate CLAUDE.md rules (forbidden patterns, required conventions, mandated tools). If a task action would contradict a CLAUDE.md directive, apply the CLAUDE.md rule — it takes precedence over plan instructions. Document any CLAUDE.md-driven adjustments as deviations (Rule 2: auto-add missing critical functionality).
 </project_context>
@@ -72,16 +73,17 @@ This ensures project-specific patterns, conventions, and best practices are appl
 Load execution context:
 
 ```bash
-INIT=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" init execute-phase "${PHASE}")
+INIT=$(gsd-sdk query init.execute-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
 Extract from init JSON: `executor_model`, `commit_docs`, `sub_repos`, `phase_dir`, `plans`, `incomplete_plans`.
 
-Also read STATE.md for position, decisions, blockers:
+Also load planning state (position, decisions, blockers) via the SDK — **use `node` to invoke the CLI** (not `npx`):
 ```bash
-cat .planning/STATE.md 2>/dev/null
+gsd-sdk query state.load 2>/dev/null
 ```
+If the SDK is not installed under `node_modules`, use the same `query state.load` argv with your local `gsd-sdk` CLI on `PATH`.
 
 If STATE.md missing but .planning/ exists: offer to reconstruct or continue without.
 If .planning/ missing: Error — project not initialized.
@@ -173,7 +175,30 @@ No user permission needed for Rules 1-3.
 
 **Trigger:** Something prevents completing current task
 
-**Examples:** Missing dependency, wrong types, broken imports, missing env var, DB connection error, build config error, missing referenced file, circular dependency
+**Examples:** Wrong types, broken imports, missing env var, DB connection error, build config error, missing referenced file, circular dependency
+
+**EXCLUDED from RULE 3 — package manager installs:**
+Running `npm install <pkg>`, `pip install <pkg>`, `cargo add <pkg>`, or any equivalent package-manager install command is **NOT** auto-fixable. If a referenced package fails to install or cannot be found:
+1. Do NOT attempt to install a similarly-named alternative.
+2. Do NOT retry with a different package name.
+3. Return a `checkpoint:human-verify` task — the user must verify the package is legitimate before the executor proceeds.
+
+This exclusion exists because a failed install may indicate a slopsquatted or hallucinated package name. Auto-substituting an alternative could install something more dangerous. If a package install fails, emit:
+
+```xml
+<task type="checkpoint:human-verify" gate="blocking-human">
+  <what-built>Package install failed — human verification required</what-built>
+  <how-to-verify>
+    `[package-name]` could not be installed. Before proceeding:
+    1. Verify the package exists and is legitimate: https://npmjs.com/package/[package-name]
+    2. Confirm the package name is spelled correctly in PLAN.md
+    3. If the package does not exist, re-run /gsd:plan-phase --research-phase <N> to find the correct package
+  </how-to-verify>
+  <resume-signal>Type "verified" with the correct package name, or "abort" to stop the phase</resume-signal>
+</task>
+```
+
+Use `gate="blocking-human"` for package-legitimacy checkpoints so they are unambiguously excluded from auto-approval behavior.
 
 ---
 
@@ -248,8 +273,8 @@ Do NOT continue reading. Analysis without action is a stuck signal.
 Check if auto mode is active at executor start (chain flag or user preference):
 
 ```bash
-AUTO_CHAIN=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow._auto_chain_active 2>/dev/null || echo "false")
-AUTO_CFG=$(node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" config-get workflow.auto_advance 2>/dev/null || echo "false")
+AUTO_CHAIN=$(gsd-sdk query config-get workflow._auto_chain_active 2>/dev/null || echo "false")
+AUTO_CFG=$(gsd-sdk query config-get workflow.auto_advance 2>/dev/null || echo "false")
 ```
 
 Auto mode is active if either `AUTO_CHAIN` or `AUTO_CFG` is `"true"`. Store the result for checkpoint handling below.
@@ -257,7 +282,7 @@ Auto mode is active if either `AUTO_CHAIN` or `AUTO_CFG` is `"true"`. Store the 
 
 <checkpoint_protocol>
 
-**CRITICAL: Automation before verification**
+**Automation before verification**
 
 Before any `checkpoint:human-verify`, ensure verification environment is ready. If plan lacks server startup before checkpoint, ADD ONE (deviation Rule 3).
 
@@ -270,7 +295,7 @@ For full automation-first patterns, server lifecycle, CLI handling:
 
 **Auto-mode checkpoint behavior** (when `AUTO_CFG` is `"true"`):
 
-- **checkpoint:human-verify** → Auto-approve. Log `⚡ Auto-approved: [what-built]`. Continue to next task.
+- **checkpoint:human-verify** → Auto-approve **except package-legitimacy checkpoints**. If checkpoint has `gate="blocking-human"` OR its purpose indicates package legitimacy verification (`what-built` mentions `Package verification required before install` or `Package install failed — human verification required`), do **not** auto-approve. STOP and return checkpoint_return_format for explicit human confirmation.
 - **checkpoint:decision** → Auto-select first option (planners front-load the recommended choice). Log `⚡ Auto-selected: [option name]`. Continue to next task.
 - **checkpoint:human-action** → STOP normally. Auth gates cannot be automated — return structured checkpoint message using checkpoint_return_format.
 
@@ -360,8 +385,94 @@ When the plan frontmatter has `type: tdd`, the entire plan follows the RED/GREEN
 If RED or GREEN gate commits are missing, add a warning to SUMMARY.md under a `## TDD Gate Compliance` section.
 </tdd_execution>
 
+## MVP+TDD Gate
+
+**When the orchestrator passes both `MVP_MODE=true` and `TDD_MODE=true`:** Before running the implementation step of any task with `tdd="true"`, run the runtime gate from `@~/.claude/get-shit-done/references/execute-mvp-tdd.md`. If the gate trips, halt and report — do NOT proceed to the implementation step.
+
+**Halt-and-report protocol:**
+
+1. Stop. Do not run the task's implementation step.
+2. Emit the structured halt report defined in `references/execute-mvp-tdd.md` (header line, reason code, expected behavior, required next step).
+3. Update `STATE.md` with `last_gate_trip: {plan_id}/{task_id}`.
+4. Exit the current execution wave cleanly. Prior commits in the same wave stay — do not roll back.
+
+**Behavior-Adding Task detection** (the gate only fires when this predicate returns true): apply via the centralized verb instead of inlining the three checks:
+
+```bash
+IS_BEHAVIOR_ADDING=$(gsd-sdk query task.is-behavior-adding "$TASK_FILE" --pick is_behavior_adding)
+```
+
+The verb owns the canonical predicate (tdd="true" frontmatter AND `<behavior>` block AND non-test source files in `<files>`). Pure doc-only / config-only / test-only tasks return `false` and are exempt. Full result also exposes per-check breakdown (`checks.tdd_true`, `checks.has_behavior_block`, `checks.has_source_files`) and a human-readable `reason` — use these in the halt-and-report payload when the gate trips. See `references/execute-mvp-tdd.md` for halt protocol.
+
+**Mode is all-or-nothing per phase** (PRD decision Q1, inherited from Phase 1). The gate is either active for the whole phase or inactive for the whole phase — it cannot apply selectively to a subset of tasks within a phase.
+
 <task_commit_protocol>
 After each task completes (verification passed, done criteria met), commit immediately.
+
+**0a. cwd-drift assertion (worktree mode only, MANDATORY before staging — #3097):**
+A prior Bash call may have `cd`'d out of the worktree into the main repo. When that happens
+`[ -f .git ]` is false (main repo's `.git` is a directory), silently skipping all worktree guards.
+Capture the spawn-time toplevel via a sentinel on first commit, then verify on every subsequent commit:
+```bash
+WT_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+case "$WT_GIT_DIR" in
+  *.git/worktrees/*)
+      SENTINEL="$WT_GIT_DIR/gsd-spawn-toplevel"
+      [ ! -f "$SENTINEL" ] && git rev-parse --show-toplevel > "$SENTINEL" 2>/dev/null
+      EXPECTED_TL=$(cat "$SENTINEL" 2>/dev/null)
+      ACTUAL_TL=$(git rev-parse --show-toplevel 2>/dev/null)
+      if [ -n "$EXPECTED_TL" ] && [ "$ACTUAL_TL" != "$EXPECTED_TL" ]; then
+        echo "FATAL: cwd drifted from spawn-time worktree root (#3097)" >&2
+        echo "  Spawn-time: $EXPECTED_TL" >&2
+        echo "  Current:    $ACTUAL_TL" >&2
+        echo "RECOVERY: cd \"$EXPECTED_TL\" before staging, then re-run this commit." >&2
+        exit 1
+      fi
+    ;;
+esac
+```
+
+**0b. absolute-path safety (worktree mode only, MANDATORY before Edit/Write — #3099):**
+Before any Edit or Write call that uses an absolute path, verify the path resolves inside the
+current worktree. Absolute paths constructed from prior `pwd` output (orchestrator's cwd) will
+resolve to the **main repo**, not the worktree — silently writing files to the wrong location.
+```bash
+# Obtain the canonical worktree root
+WT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -z "$WT_ROOT" ] && { echo "FATAL: could not determine worktree root" >&2; exit 1; }
+# Verify absolute path containment with boundary safety (not glob prefix which allows siblings)
+if [[ "$ABS_PATH" != "$WT_ROOT" && "$ABS_PATH" != "$WT_ROOT/"* ]]; then
+  echo "FATAL: $ABS_PATH is outside the worktree ($WT_ROOT) — use a relative path or recompute from WT_ROOT" >&2
+  exit 1
+fi
+```
+Prefer **relative paths** for all Edit/Write operations inside a worktree. When an absolute path
+is unavoidable, always derive it from `git rev-parse --show-toplevel` run inside the worktree,
+not from a `pwd` captured in the orchestrator context.
+
+**0. Pre-commit HEAD safety assertion (worktree mode only, MANDATORY before every commit — #2924):**
+When running inside a Claude Code worktree (`.git` is a file, not a directory), assert HEAD is on a per-agent branch BEFORE staging or committing. If HEAD has drifted onto a protected ref, HALT — never self-recover via `git update-ref refs/heads/<protected>`:
+```bash
+if [ -f .git ]; then  # worktree
+  HEAD_REF=$(git symbolic-ref --quiet HEAD || echo "DETACHED")
+  ACTUAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  # Deny-list: never commit on a protected ref.
+  if [ "$HEAD_REF" = "DETACHED" ] || \
+     echo "$ACTUAL_BRANCH" | grep -Eq '^(main|master|develop|trunk|release/.*)$'; then
+    echo "FATAL: refusing to commit — worktree HEAD is on '$ACTUAL_BRANCH' (expected per-agent branch)." >&2
+    echo "DO NOT use 'git update-ref' to rewind the protected branch — surface as blocker (#2924)." >&2
+    exit 1
+  fi
+  # Positive allow-list: HEAD must be on the canonical Claude Code worktree-agent
+  # branch namespace (`worktree-agent-<id>`). This catches feature/* and any other
+  # arbitrary branch that the deny-list would silently allow (#2924).
+  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^worktree-agent-[A-Za-z0-9._/-]+$'; then
+    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the worktree-agent-* namespace." >&2
+    echo "Agent commits must live on per-agent branches; surface as blocker (#2924)." >&2
+    exit 1
+  fi
+fi
+```
 
 **1. Check modified files:** `git status --short`
 
@@ -388,7 +499,7 @@ git add src/types/user.ts
 
 **If `sub_repos` is configured (non-empty array from init context):** Use `commit-to-subrepo` to route files to their correct sub-repo:
 ```bash
-node ~/.claude/get-shit-done/bin/gsd-tools.cjs commit-to-subrepo "{type}({phase}-{plan}): {concise task description}" --files file1 file2 ...
+gsd-sdk query commit-to-subrepo "{type}({phase}-{plan}): {concise task description}" --files file1 file2 ...
 ```
 Returns JSON with per-repo commit hashes: `{ committed: true, repos: { "backend": { hash: "abc", files: [...] }, ... } }`. Record all hashes for SUMMARY.
 
@@ -431,6 +542,39 @@ back, those deletions appear on the main branch, destroying prior-wave work (#20
 - `git rm` on files not explicitly created by the current task
 - `git checkout -- .` or `git restore .` (blanket working-tree resets that discard files)
 - `git reset --hard` except inside the `<worktree_branch_check>` step at agent startup
+- `git update-ref refs/heads/<protected>` (where protected is `main`, `master`,
+  `develop`, `trunk`, or `release/*`). This is an absolute prohibition (#2924).
+  If you discover that your worktree HEAD is attached to a protected branch and your
+  commits landed there, **DO NOT** "recover" by force-rewinding the protected ref —
+  that silently destroys concurrent commits in multi-active scenarios (parallel
+  agents, user committing while you run). HALT and surface a blocker. The setup-time
+  `<worktree_branch_check>` and per-commit `<pre_commit_head_assertion>` are the
+  correct prevention; if either fails, the workflow MUST stop, not self-heal.
+- `git push --force` / `git push -f` to any branch you did not create.
+- `git stash`, `git stash push`, `git stash pop`, `git stash apply`, `git stash drop`
+  (and any other `git stash` subcommand). **The stash list is shared across the
+  main checkout and every linked worktree** — git stores stashes at `refs/stash`
+  inside the parent `.git/` directory, not inside the per-worktree
+  `.git/worktrees/<name>/` subdirectory. From inside your worktree, `git stash list`
+  shows the global stack with no indication that entries originated elsewhere, and
+  `git stash pop` pops the top of that global stack regardless of which worktree
+  pushed it. Running `git stash pop` after a `git stash` that printed "No local
+  changes to save" will silently apply WIP from a sibling worktree's prior
+  session — typically producing UU/UD merge-conflict states, phantom untracked
+  files, and a contaminated working tree that violates the `isolation="worktree"`
+  invariant of your execution (#3542).
+
+  **Sanctioned alternatives** when you need to set aside or inspect work without
+  touching `refs/stash`:
+
+  - **Move WIP off the working tree:** commit it to a throwaway branch you own
+    (e.g. `git checkout -b scratch-/<task>-wip && git add -A && git commit -m "wip"`),
+    then `git checkout <your-worktree-branch>` to return to your task. The
+    throwaway branch lives in the per-worktree branch namespace and never
+    collides with sibling worktrees.
+  - **Read-only inspection of another ref:** use `git show <ref>:<path>` to
+    print a file at any ref, or `git diff <ref> -- <path>` to compare. Neither
+    mutates `refs/stash` nor leaks state across worktrees.
 
 If you need to discard changes to a specific file you modified during this task, use:
 ```bash
@@ -445,7 +589,7 @@ file individually. If a file appears untracked but is not part of your task, lea
 <summary_creation>
 After all tasks complete, create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`.
 
-**ALWAYS use the Write tool to create files** — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
+Use the Write tool to create files — never use `Bash(cat << 'EOF')` or heredoc commands for file creation.
 
 **Use template:** @~/.claude/get-shit-done/templates/summary.md
 
@@ -515,38 +659,36 @@ Do NOT skip. Do NOT proceed to state updates if self-check fails.
 </self_check>
 
 <state_updates>
-After SUMMARY.md, update STATE.md using gsd-tools:
+After SUMMARY.md, update STATE.md using `gsd-sdk query` state handlers (positional args; see `sdk/src/query/QUERY-HANDLERS.md`):
 
 ```bash
 # Advance plan counter (handles edge cases automatically)
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state advance-plan
+gsd-sdk query state.advance-plan
 
 # Recalculate progress bar from disk state
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state update-progress
+gsd-sdk query state.update-progress
 
-# Record execution metrics
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state record-metric \
-  --phase "${PHASE}" --plan "${PLAN}" --duration "${DURATION}" \
-  --tasks "${TASK_COUNT}" --files "${FILE_COUNT}"
+# Record execution metrics (phase, plan, duration, tasks, files)
+gsd-sdk query state.record-metric \
+  "${PHASE}" "${PLAN}" "${DURATION}" "${TASK_COUNT}" "${FILE_COUNT}"
 
 # Add decisions (extract from SUMMARY.md key-decisions)
 for decision in "${DECISIONS[@]}"; do
-  node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state add-decision \
-    --phase "${PHASE}" --summary "${decision}"
+  gsd-sdk query state.add-decision "${decision}"
 done
 
-# Update session info
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state record-session \
-  --stopped-at "Completed ${PHASE}-${PLAN}-PLAN.md"
+# Update session info (timestamp, stopped-at, resume-file)
+gsd-sdk query state.record-session \
+  "" "Completed ${PHASE}-${PLAN}-PLAN.md" "None"
 ```
 
 ```bash
 # Update ROADMAP.md progress for this phase (plan counts, status)
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" roadmap update-plan-progress "${PHASE_NUMBER}"
+gsd-sdk query roadmap.update-plan-progress "${PHASE_NUMBER}"
 
 # Mark completed requirements from PLAN.md frontmatter
 # Extract the `requirements` array from the plan's frontmatter, then mark each complete
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" requirements mark-complete ${REQ_IDS}
+gsd-sdk query requirements.mark-complete ${REQ_IDS}
 ```
 
 **Requirement IDs:** Extract from the PLAN.md frontmatter `requirements:` field (e.g., `requirements: [AUTH-01, AUTH-02]`). Pass all IDs to `requirements mark-complete`. If the plan has no requirements field, skip this step.
@@ -564,16 +706,39 @@ node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" requirements mark-complete 
 
 **For blockers found during execution:**
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" state add-blocker "Blocker description"
+gsd-sdk query state.add-blocker "Blocker description"
 ```
 </state_updates>
 
 <final_commit>
 ```bash
-node "$HOME/.claude/get-shit-done/bin/gsd-tools.cjs" commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
+gsd-sdk query commit "docs({phase}-{plan}): complete [plan-name] plan" --files \
+  .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
 ```
 
 Separate from per-task commits — captures execution results only.
+
+**Handling the SDK return envelope (#3678):** `gsd-sdk query commit` returns
+one of three shapes:
+
+- `{committed: true, hash, reason: 'committed'}` — commit succeeded; record
+  the hash in the completion format.
+- `{committed: false, skipped: true, reason: 'skipped_commit_docs_false'}` —
+  the user has `commit_docs: false` in `.planning/config.json`. **This is an
+  intentional success path.** Record "skipped (commit_docs disabled)" in the
+  completion format and move on.
+- `{committed: false, skipped: true, reason: 'skipped_gitignored'}` —
+  `.planning/` is gitignored in the user's project. **Also an intentional
+  success path.** Record "skipped (.planning gitignored)" and move on.
+- `{committed: false, reason: 'nothing_to_commit' | 'commit_failed', ...}` —
+  no-op / genuine failure; surface in the completion notes.
+
+**Do not fall back to raw `git add` / `git commit` / `git add -f`** when the
+SDK returns `skipped: true`. The SDK's skip is the user's deliberate choice
+to keep `.planning/` files out of git history. Force-staging gitignored
+content via `git add -f .planning/...` is forbidden — that bug is exactly
+the regression #3678 reported, where the agent leaks `.planning/` artifacts
+into the user's project history.
 </final_commit>
 
 <completion_format>
@@ -604,6 +769,6 @@ Plan execution complete when:
 - [ ] SUMMARY.md created with substantive content
 - [ ] STATE.md updated (position, decisions, issues, session)
 - [ ] ROADMAP.md updated with plan progress (via `roadmap update-plan-progress`)
-- [ ] Final metadata commit made (includes SUMMARY.md, STATE.md, ROADMAP.md)
+- [ ] Final metadata commit made (includes SUMMARY.md, STATE.md, ROADMAP.md), or SDK returned an intentional skip (`skipped_commit_docs_false` / `skipped_gitignored`) — record "skipped (<reason>)" in completion notes
 - [ ] Completion format returned to orchestrator
 </success_criteria>

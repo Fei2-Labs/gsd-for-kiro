@@ -4,70 +4,17 @@
 
 const fs = require('fs');
 const path = require('path');
-const { output, error, planningDir, withPlanningLock, CONFIG_DEFAULTS, atomicWriteFileSync } = require('./core.cjs');
+const { output, error, ERROR_REASON, CONFIG_DEFAULTS } = require('./core.cjs');
+const { platformWriteSync, platformEnsureDir } = require('./shell-command-projection.cjs');
+const { planningDir, withPlanningLock } = require('./planning-workspace.cjs');
 const {
   VALID_PROFILES,
   getAgentToModelMapForProfile,
   formatAgentToModelMapAsTable,
 } = require('./model-profiles.cjs');
-
-const VALID_CONFIG_KEYS = new Set([
-  'mode', 'granularity', 'parallelization', 'commit_docs', 'model_profile',
-  'search_gitignored', 'brave_search', 'firecrawl', 'exa_search',
-  'workflow.research', 'workflow.plan_check', 'workflow.verifier',
-  'workflow.nyquist_validation', 'workflow.ai_integration_phase', 'workflow.ui_phase', 'workflow.ui_safety_gate',
-  'workflow.auto_advance', 'workflow.node_repair', 'workflow.node_repair_budget',
-  'workflow.tdd_mode',
-  'workflow.text_mode',
-  'workflow.research_before_questions',
-  'workflow.discuss_mode',
-  'workflow.skip_discuss',
-  'workflow.auto_prune_state',
-  'workflow._auto_chain_active',
-  'workflow.use_worktrees',
-  'workflow.code_review',
-  'workflow.code_review_depth',
-  'workflow.code_review_command',
-  'workflow.pattern_mapper',
-  'workflow.plan_bounce',
-  'workflow.plan_bounce_script',
-  'workflow.plan_bounce_passes',
-  'git.branching_strategy', 'git.base_branch', 'git.phase_branch_template', 'git.milestone_branch_template', 'git.quick_branch_template',
-  'planning.commit_docs', 'planning.search_gitignored',
-  'workflow.cross_ai_execution', 'workflow.cross_ai_command', 'workflow.cross_ai_timeout',
-  'workflow.subagent_timeout',
-  'workflow.inline_plan_threshold',
-  'hooks.context_warnings',
-  'features.thinking_partner',
-  'context',
-  'features.global_learnings',
-  'learnings.max_inject',
-  'project_code', 'phase_naming',
-  'manager.flags.discuss', 'manager.flags.plan', 'manager.flags.execute',
-  'response_language',
-  'intel.enabled',
-  'graphify.enabled',
-  'graphify.build_timeout',
-  'claude_md_path',
-]);
-
-/**
- * Check whether a config key path is valid.
- * Supports exact matches from VALID_CONFIG_KEYS plus dynamic patterns
- * like `agent_skills.<agent-type>` where the sub-key is freeform.
- */
-function isValidConfigKey(keyPath) {
-  if (VALID_CONFIG_KEYS.has(keyPath)) return true;
-  // Allow agent_skills.<agent-type> with any agent type string
-  if (/^agent_skills\.[a-zA-Z0-9_-]+$/.test(keyPath)) return true;
-  // Allow review.models.<cli-name> for per-CLI model selection in /gsd-review
-  if (/^review\.models\.[a-zA-Z0-9_-]+$/.test(keyPath)) return true;
-  // Allow features.<feature_name> — dynamic namespace for feature flags.
-  // Intentionally open-ended so new flags (e.g., features.global_learnings) work
-  // without updating VALID_CONFIG_KEYS each time.
-  if (/^features\.[a-zA-Z0-9_]+$/.test(keyPath)) return true;
-  return false;
-}
+const { VALID_CONFIG_KEYS, isValidConfigKey } = require('./config-schema.cjs');
+const { isSecretKey, maskSecret } = require('./secrets.cjs');
+const { normalizeConfiguredDefaultReviewers } = require('./review-reviewer-selection.cjs');
 
 const CONFIG_KEY_SUGGESTIONS = {
   'workflow.nyquist_validation_enabled': 'workflow.nyquist_validation',
@@ -81,13 +28,83 @@ const CONFIG_KEY_SUGGESTIONS = {
   'workflow.code_review_level': 'workflow.code_review_depth',
   'workflow.review_depth': 'workflow.code_review_depth',
   'review.model': 'review.models.<cli-name>',
+  'sub_repos': 'planning.sub_repos',
+  'plan_checker': 'workflow.plan_check',
 };
+
+const SHIP_PR_BODY_SECTION_KEYS = new Set(['heading', 'enabled', 'source', 'fallback', 'template']);
+const SHIP_PR_BODY_TEMPLATE_TOKENS = new Set([
+  'phase_number',
+  'phase_name',
+  'phase_dir',
+  'base_branch',
+  'padded_phase',
+]);
+const SHIP_PR_BODY_SOURCE_RE = /^(ROADMAP|PLAN|SUMMARY|VERIFICATION|STATE|REQUIREMENTS|CONTEXT)\.md\s+##\s+[^\r\n#][^\r\n]*$/;
 
 function validateKnownConfigKeyPath(keyPath) {
   const suggested = CONFIG_KEY_SUGGESTIONS[keyPath];
   if (suggested) {
-    error(`Unknown config key: ${keyPath}. Did you mean ${suggested}?`);
+    error(`Unknown config key: ${keyPath}. Did you mean ${suggested}?`, ERROR_REASON.CONFIG_INVALID_KEY);
   }
+}
+
+function validateShipPrBodySections(value) {
+  if (!Array.isArray(value)) {
+    error('Invalid ship.pr_body_sections value. Expected a JSON array of section objects.');
+  }
+
+  value.forEach((section, index) => {
+    const prefix = `Invalid ship.pr_body_sections[${index}]`;
+    if (!section || typeof section !== 'object' || Array.isArray(section)) {
+      error(`${prefix}. Expected an object.`);
+    }
+
+    const unknownKeys = Object.keys(section).filter((key) => !SHIP_PR_BODY_SECTION_KEYS.has(key));
+    if (unknownKeys.length > 0) {
+      error(`${prefix}. Unknown field(s): ${unknownKeys.join(', ')}.`);
+    }
+
+    if (typeof section.heading !== 'string' || section.heading.trim() === '') {
+      error(`${prefix}. heading must be a non-empty string.`);
+    }
+    if (/[\r\n]/.test(section.heading)) {
+      error(`${prefix}. heading must be a single line.`);
+    }
+
+    if ('enabled' in section && typeof section.enabled !== 'boolean') {
+      error(`${prefix}. enabled must be true or false.`);
+    }
+
+    for (const field of ['source', 'fallback', 'template']) {
+      if (field in section && typeof section[field] !== 'string') {
+        error(`${prefix}. ${field} must be a string.`);
+      }
+    }
+
+    const hasContent = ['source', 'fallback', 'template'].some((field) => {
+      return typeof section[field] === 'string' && section[field].trim() !== '';
+    });
+    if (!hasContent) {
+      error(`${prefix}. Provide at least one of source, fallback, or template.`);
+    }
+
+    if (typeof section.source === 'string' && section.source.trim() !== '') {
+      const selectors = section.source.split('||').map((selector) => selector.trim()).filter(Boolean);
+      if (selectors.length === 0 || selectors.some((selector) => !SHIP_PR_BODY_SOURCE_RE.test(selector))) {
+        error(`${prefix}. source must use selectors like "PLAN.md ## Risks", separated with "||".`);
+      }
+    }
+
+    if (typeof section.template === 'string') {
+      const tokens = section.template.matchAll(/\{([a-zA-Z][a-zA-Z0-9_]*)\}/g);
+      for (const match of tokens) {
+        if (!SHIP_PR_BODY_TEMPLATE_TOKENS.has(match[1])) {
+          error(`${prefix}. Unsupported template token: {${match[1]}}.`);
+        }
+      }
+    }
+  });
 }
 
 /**
@@ -96,7 +113,7 @@ function validateKnownConfigKeyPath(keyPath) {
  * Merges (increasing priority):
  *   1. Hardcoded defaults — every key that loadConfig() resolves, plus mode/granularity
  *   2. User-level defaults from ~/.gsd/defaults.json (if present)
- *   3. userChoices — the settings the user explicitly selected during /gsd-new-project
+ *   3. userChoices — the settings the user explicitly selected during /gsd:new-project
  *
  * Uses the canonical `git` namespace for branching keys (consistent with VALID_CONFIG_KEYS
  * and the settings workflow). loadConfig() handles both flat and nested formats, so this
@@ -128,7 +145,7 @@ function buildNewProjectConfig(userChoices) {
         userDefaults.granularity = depthToGranularity[userDefaults.depth] || userDefaults.depth;
         delete userDefaults.depth;
         try {
-          fs.writeFileSync(globalDefaultsPath, JSON.stringify(userDefaults, null, 2), 'utf-8');
+          platformWriteSync(globalDefaultsPath, JSON.stringify(userDefaults, null, 2));
         } catch { /* intentionally empty */ }
       }
     }
@@ -146,6 +163,7 @@ function buildNewProjectConfig(userChoices) {
     exa_search: hasExaSearch,
     git: {
       branching_strategy: CONFIG_DEFAULTS.branching_strategy,
+      create_tag: true,
       phase_branch_template: CONFIG_DEFAULTS.phase_branch_template,
       milestone_branch_template: CONFIG_DEFAULTS.milestone_branch_template,
       quick_branch_template: CONFIG_DEFAULTS.quick_branch_template,
@@ -162,6 +180,7 @@ function buildNewProjectConfig(userChoices) {
       ui_safety_gate: true,
       ai_integration_phase: true,
       tdd_mode: false,
+      human_verify_mode: 'end-of-phase',
       text_mode: false,
       research_before_questions: false,
       discuss_mode: 'discuss',
@@ -174,6 +193,13 @@ function buildNewProjectConfig(userChoices) {
       plan_bounce_script: null,
       plan_bounce_passes: 2,
       auto_prune_state: false,
+      post_planning_gaps: CONFIG_DEFAULTS.post_planning_gaps,
+      security_enforcement: CONFIG_DEFAULTS.security_enforcement,
+      security_asvs_level: CONFIG_DEFAULTS.security_asvs_level,
+      security_block_on: CONFIG_DEFAULTS.security_block_on,
+    },
+    ship: {
+      pr_body_sections: [],
     },
     hooks: {
       context_warnings: true,
@@ -185,7 +211,7 @@ function buildNewProjectConfig(userChoices) {
   };
 
   // Three-level deep merge: hardcoded <- userDefaults <- choices
-  return {
+  const config = {
     ...hardcoded,
     ...userDefaults,
     ...choices,
@@ -199,6 +225,11 @@ function buildNewProjectConfig(userChoices) {
       ...(userDefaults.workflow || {}),
       ...(choices.workflow || {}),
     },
+    ship: {
+      ...hardcoded.ship,
+      ...(userDefaults.ship || {}),
+      ...(choices.ship || {}),
+    },
     hooks: {
       ...hardcoded.hooks,
       ...(userDefaults.hooks || {}),
@@ -210,13 +241,16 @@ function buildNewProjectConfig(userChoices) {
       ...(choices.agent_skills || {}),
     },
   };
+
+  validateShipPrBodySections(config.ship.pr_body_sections);
+  return config;
 }
 
 /**
  * Command: create a fully-materialized .planning/config.json for a new project.
  *
  * Accepts user-chosen settings as a JSON string (the keys the user explicitly
- * configured during /gsd-new-project). All remaining keys are filled from
+ * configured during /gsd:new-project). All remaining keys are filled from
  * hardcoded defaults and optional ~/.gsd/defaults.json.
  *
  * Idempotent: if config.json already exists, returns { created: false }.
@@ -243,9 +277,7 @@ function cmdConfigNewProject(cwd, choicesJson, raw) {
 
   // Ensure .planning directory exists
   try {
-    if (!fs.existsSync(planningBase)) {
-      fs.mkdirSync(planningBase, { recursive: true });
-    }
+    platformEnsureDir(planningBase);
   } catch (err) {
     error('Failed to create .planning directory: ' + err.message);
   }
@@ -253,7 +285,7 @@ function cmdConfigNewProject(cwd, choicesJson, raw) {
   const config = buildNewProjectConfig(userChoices);
 
   try {
-    atomicWriteFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    platformWriteSync(configPath, JSON.stringify(config, null, 2));
     output({ created: true, path: '.planning/config.json' }, raw, 'created');
   } catch (err) {
     error('Failed to write config.json: ' + err.message);
@@ -272,9 +304,7 @@ function ensureConfigFile(cwd) {
 
   // Ensure .planning directory exists
   try {
-    if (!fs.existsSync(planningBase)) {
-      fs.mkdirSync(planningBase, { recursive: true });
-    }
+    platformEnsureDir(planningBase);
   } catch (err) {
     error('Failed to create .planning directory: ' + err.message);
   }
@@ -287,7 +317,7 @@ function ensureConfigFile(cwd) {
   const config = buildNewProjectConfig({});
 
   try {
-    atomicWriteFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    platformWriteSync(configPath, JSON.stringify(config, null, 2));
     return { created: true, path: '.planning/config.json' };
   } catch (err) {
     error('Failed to create config.json: ' + err.message);
@@ -327,7 +357,7 @@ function setConfigValue(cwd, keyPath, parsedValue) {
         config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       }
     } catch (err) {
-      error('Failed to read config.json: ' + err.message);
+      error('Failed to read config.json: ' + err.message, ERROR_REASON.CONFIG_PARSE_FAILED);
     }
 
     // Set nested value using dot notation (e.g., "workflow.research")
@@ -345,7 +375,7 @@ function setConfigValue(cwd, keyPath, parsedValue) {
 
     // Write back
     try {
-      atomicWriteFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      platformWriteSync(configPath, JSON.stringify(config, null, 2));
       return { updated: true, key: keyPath, value: parsedValue, previousValue };
     } catch (err) {
       error('Failed to write config.json: ' + err.message);
@@ -362,13 +392,23 @@ function setConfigValue(cwd, keyPath, parsedValue) {
  */
 function cmdConfigSet(cwd, keyPath, value, raw) {
   if (!keyPath) {
-    error('Usage: config-set <key.path> <value>');
+    error('Usage: config-set <key.path> <value>', ERROR_REASON.USAGE);
+  }
+  // #3593: reject the "key without value" form (e.g. `config-set
+  // model_profile` with args[2] === undefined). Without this guard the
+  // value passes through as undefined, the number/boolean/json branches
+  // all fall through, and the write either silently strips the key
+  // (JSON.stringify drops undefined values) or writes a corrupt entry.
+  // Typed reason so the negative-matrix test can assert on it instead
+  // of greppinng prose.
+  if (value === undefined) {
+    error('Usage: config-set <key.path> <value>', ERROR_REASON.USAGE);
   }
 
   validateKnownConfigKeyPath(keyPath);
 
   if (!isValidConfigKey(keyPath)) {
-    error(`Unknown config key: "${keyPath}". Valid keys: ${[...VALID_CONFIG_KEYS].sort().join(', ')}, agent_skills.<agent-type>, features.<feature_name>`);
+    error(`Unknown config key: "${keyPath}". Valid keys: ${[...VALID_CONFIG_KEYS].sort().join(', ')}, agent_skills.<agent-type>, features.<feature_name>`, ERROR_REASON.CONFIG_INVALID_KEY);
   }
 
   // Parse value (handle booleans, numbers, and JSON arrays/objects)
@@ -385,9 +425,99 @@ function cmdConfigSet(cwd, keyPath, value, raw) {
     error(`Invalid context value '${value}'. Valid values: ${VALID_CONTEXT_VALUES.join(', ')}`);
   }
 
+  // Codebase drift detector (#2003)
+  const VALID_DRIFT_ACTIONS = ['warn', 'auto-remap'];
+  if (keyPath === 'workflow.drift_action' && !VALID_DRIFT_ACTIONS.includes(String(parsedValue))) {
+    error(`Invalid workflow.drift_action '${value}'. Valid values: ${VALID_DRIFT_ACTIONS.join(', ')}`);
+  }
+  if (keyPath === 'workflow.drift_threshold') {
+    if (typeof parsedValue !== 'number' || !Number.isInteger(parsedValue) || parsedValue < 1) {
+      error(`Invalid workflow.drift_threshold '${value}'. Must be a positive integer.`);
+    }
+  }
+
+  // Post-planning gap checker (#2493)
+  if (keyPath === 'workflow.post_planning_gaps') {
+    if (typeof parsedValue !== 'boolean') {
+      error(`Invalid workflow.post_planning_gaps '${value}'. Must be a boolean (true or false).`);
+    }
+  }
+
+  // #3086 — git.create_tag: boolean only
+  if (keyPath === 'git.create_tag') {
+    if (typeof parsedValue !== 'boolean') {
+      error(`Invalid git.create_tag '${value}'. Must be a boolean (true or false).`);
+    }
+  }
+
+  if (keyPath === 'ship.pr_body_sections') {
+    validateShipPrBodySections(parsedValue);
+  }
+
+  // Human verification checkpoint mode (#3309)
+  const VALID_HUMAN_VERIFY_MODES = ['mid-flight', 'end-of-phase'];
+  if (keyPath === 'workflow.human_verify_mode' && !VALID_HUMAN_VERIFY_MODES.includes(String(parsedValue))) {
+    error(`Invalid workflow.human_verify_mode '${value}'. Valid values: ${VALID_HUMAN_VERIFY_MODES.join(', ')}`);
+  }
+
+  // Context position enum validation (#2937)
+  const VALID_CONTEXT_POSITIONS = ['front', 'end'];
+  if (keyPath === 'statusline.context_position' && !VALID_CONTEXT_POSITIONS.includes(String(parsedValue))) {
+    error(`Invalid statusline.context_position '${value}'. Valid values: ${VALID_CONTEXT_POSITIONS.join(', ')}`);
+  }
+
+  // Fallow scope + profile enum validation (#3424)
+  const VALID_FALLOW_SCOPES = ['phase', 'repo'];
+  if (keyPath === 'code_quality.fallow.scope' && !VALID_FALLOW_SCOPES.includes(String(parsedValue))) {
+    error(`Invalid code_quality.fallow.scope '${value}'. Valid values: ${VALID_FALLOW_SCOPES.join(', ')}`);
+  }
+  const VALID_FALLOW_PROFILES = ['minimal', 'standard', 'strict'];
+  if (keyPath === 'code_quality.fallow.profile' && !VALID_FALLOW_PROFILES.includes(String(parsedValue))) {
+    error(`Invalid code_quality.fallow.profile '${value}'. Valid values: ${VALID_FALLOW_PROFILES.join(', ')}`);
+  }
+
+  if (keyPath === 'review.default_reviewers') {
+    const normalized = normalizeConfiguredDefaultReviewers(parsedValue);
+    if (normalized.errors.length > 0) {
+      error(normalized.errors[0]);
+    }
+    parsedValue = normalized.values;
+  }
+
   const setConfigValueResult = setConfigValue(cwd, keyPath, parsedValue);
+
+  // Mask secrets in both JSON and text output. The plaintext is written
+  // to config.json (that's where secrets live on disk); the CLI output
+  // must never echo it. See lib/secrets.cjs.
+  if (isSecretKey(keyPath)) {
+    const masked = maskSecret(parsedValue);
+    const maskedPrev = setConfigValueResult.previousValue === undefined
+      ? undefined
+      : maskSecret(setConfigValueResult.previousValue);
+    const maskedResult = {
+      ...setConfigValueResult,
+      value: masked,
+      previousValue: maskedPrev,
+      masked: true,
+    };
+    output(maskedResult, raw, `${keyPath}=${masked}`);
+    return;
+  }
+
   output(setConfigValueResult, raw, `${keyPath}=${parsedValue}`);
 }
+
+/**
+ * Schema-level defaults for well-known config keys.
+ * When a key is absent from config.json and no --default flag was supplied,
+ * cmdConfigGet checks here before emitting "Key not found".
+ */
+const SCHEMA_DEFAULTS = {
+  'context_window': 200000,
+  'executor.stall_detect_interval_minutes': 5,
+  'executor.stall_threshold_minutes': 10,
+  'git.create_tag': true,
+};
 
 function cmdConfigGet(cwd, keyPath, raw, defaultValue) {
   const configPath = path.join(planningDir(cwd), 'config.json');
@@ -404,12 +534,16 @@ function cmdConfigGet(cwd, keyPath, raw, defaultValue) {
     } else if (hasDefault) {
       output(defaultValue, raw, String(defaultValue));
       return;
+    } else if (Object.prototype.hasOwnProperty.call(SCHEMA_DEFAULTS, keyPath)) {
+      const def = SCHEMA_DEFAULTS[keyPath];
+      output(def, raw, String(def));
+      return;
     } else {
-      error('No config.json found at ' + configPath);
+      error('No config.json found at ' + configPath, ERROR_REASON.CONFIG_NO_FILE);
     }
   } catch (err) {
     if (err.message.startsWith('No config.json')) throw err;
-    error('Failed to read config.json: ' + err.message);
+    error('Failed to read config.json: ' + err.message, ERROR_REASON.CONFIG_PARSE_FAILED);
   }
 
   // Traverse dot-notation path (e.g., "workflow.auto_advance")
@@ -418,14 +552,32 @@ function cmdConfigGet(cwd, keyPath, raw, defaultValue) {
   for (const key of keys) {
     if (current === undefined || current === null || typeof current !== 'object') {
       if (hasDefault) { output(defaultValue, raw, String(defaultValue)); return; }
-      error(`Key not found: ${keyPath}`);
+      if (Object.prototype.hasOwnProperty.call(SCHEMA_DEFAULTS, keyPath)) {
+        const def = SCHEMA_DEFAULTS[keyPath];
+        output(def, raw, String(def));
+        return;
+      }
+      error(`Key not found: ${keyPath}`, ERROR_REASON.CONFIG_KEY_NOT_FOUND);
     }
     current = current[key];
   }
 
   if (current === undefined) {
     if (hasDefault) { output(defaultValue, raw, String(defaultValue)); return; }
-    error(`Key not found: ${keyPath}`);
+    if (Object.prototype.hasOwnProperty.call(SCHEMA_DEFAULTS, keyPath)) {
+      const def = SCHEMA_DEFAULTS[keyPath];
+      output(def, raw, String(def));
+      return;
+    }
+    error(`Key not found: ${keyPath}`, ERROR_REASON.CONFIG_KEY_NOT_FOUND);
+  }
+
+  // Never echo plaintext for sensitive keys via config-get. Plaintext lives
+  // in config.json on disk; the CLI surface always shows the masked form.
+  if (isSecretKey(keyPath)) {
+    const masked = maskSecret(current);
+    output(masked, raw, masked);
+    return;
   }
 
   output(current, raw, String(current));
@@ -506,6 +658,40 @@ function cmdConfigPath(cwd) {
   output(configPath, true, configPath);
 }
 
+/**
+ * Explicit on-disk migration of legacy config keys to canonical nested shape.
+ *
+ * Wraps the Configuration Module's migrateOnDisk() for the CLI surface. This
+ * is the Phase 2 acceptance-criteria deliverable for opt-in migration (#3536):
+ * users can run `gsd-tools migrate-config` to apply all four legacy-key
+ * migrations to their .planning/config.json without having to load any config
+ * implicitly via another command.
+ *
+ * Output: JSON object with { migrated, normalizations, wrote } or a human-readable
+ * summary when --raw is set. Exits 0 in all cases (including no-op).
+ */
+async function cmdMigrateConfig(cwd, raw) {
+  const { migrateOnDisk } = require('./configuration.generated.cjs');
+  const ws = process.env.GSD_WORKSTREAM || null;
+  const report = await migrateOnDisk(cwd, ws || undefined);
+
+  if (raw) {
+    if (!report.migrated) {
+      const msg = 'No legacy keys found — config is already canonical.';
+      output(msg, true, msg);
+    } else {
+      const lines = [
+        `Migrated: ${report.wrote}`,
+        ...report.normalizations.map(n => `  ${n.from} → ${n.to}`),
+      ].join('\n');
+      output(lines, true, lines);
+    }
+  } else {
+    // output() JSON.stringify's its first arg when raw=false; pass the report object.
+    output(report, false, report);
+  }
+}
+
 module.exports = {
   VALID_CONFIG_KEYS,
   cmdConfigEnsureSection,
@@ -514,4 +700,5 @@ module.exports = {
   cmdConfigSetModelProfile,
   cmdConfigNewProject,
   cmdConfigPath,
+  cmdMigrateConfig,
 };

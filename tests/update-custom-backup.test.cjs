@@ -225,4 +225,66 @@ describe('detect-custom-files — update workflow backup detection (#1997)', () 
       `should detect custom reference; got: ${JSON.stringify(json.custom_files)}`
     );
   });
+
+  // After v1.39.0 skill consolidation (#2790), the installer wipes skills/ on
+  // update. skills/ is now a GSD-managed directory and must be scanned so that
+  // user-added skill directories are backed up before the wipe (#2942).
+  // GSD-owned skills (tracked in manifest) must NOT be flagged as custom.
+  test('scans skills/ directory and detects user-added skills not in manifest (#2942)', () => {
+    writeManifest(tmpDir, {
+      'get-shit-done/workflows/execute-phase.md': '# Execute Phase\n',
+      'skills/gsd-planner/SKILL.md': '# GSD Planner\n',
+    });
+
+    // Simulate user having a custom skill installed — NOT in manifest
+    const customSkillDir = path.join(tmpDir, 'skills', 'my-custom-skill');
+    fs.mkdirSync(customSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(customSkillDir, 'SKILL.md'), '# My Custom Skill\n');
+
+    const result = runGsdTools(
+      ['detect-custom-files', '--config-dir', tmpDir],
+      tmpDir
+    );
+
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const json = JSON.parse(result.output);
+
+    // The user's custom skill should be detected
+    assert.ok(
+      json.custom_files.includes('skills/my-custom-skill/SKILL.md'),
+      `custom skill should be detected; got: ${JSON.stringify(json.custom_files)}`
+    );
+
+    // The GSD-owned skill (in manifest) should NOT be flagged as custom
+    assert.ok(
+      !json.custom_files.includes('skills/gsd-planner/SKILL.md'),
+      `GSD-owned skill should not be flagged as custom; got: ${JSON.stringify(json.custom_files)}`
+    );
+  });
+
+  test('does not scan command/ directory (installer does not wipe it)', () => {
+    writeManifest(tmpDir, {
+      'get-shit-done/workflows/execute-phase.md': '# Execute Phase\n',
+    });
+
+    // Simulate files in command/ dir not wiped by installer
+    const commandDir = path.join(tmpDir, 'command');
+    fs.mkdirSync(commandDir, { recursive: true });
+    fs.writeFileSync(path.join(commandDir, 'user-command.md'), '# User Command\n');
+
+    const result = runGsdTools(
+      ['detect-custom-files', '--config-dir', tmpDir],
+      tmpDir
+    );
+
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const json = JSON.parse(result.output);
+    const commandFiles = json.custom_files.filter(f => f.startsWith('command/'));
+    assert.strictEqual(
+      commandFiles.length, 0,
+      `command/ should not be scanned; got false positives: ${JSON.stringify(commandFiles)}`
+    );
+  });
 });

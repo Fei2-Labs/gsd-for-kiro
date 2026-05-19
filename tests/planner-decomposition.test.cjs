@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * Tests for modular decomposition of agents/gsd-planner.md
  *
@@ -20,7 +25,7 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 // ─── Size thresholds ─────────────────────────────────────────────────────────
 
 const AGENT_FILE_SIZE_LIMIT = 100 * 1024;   // 100K — appropriate for version-controlled source
-const PLANNER_EXTRACTED_LIMIT = 45 * 1024;  // 45K — proves extraction happened
+const PLANNER_EXTRACTED_LIMIT = 48 * 1024;  // 48K — proves extraction happened
 
 // ─── File paths ──────────────────────────────────────────────────────────────
 

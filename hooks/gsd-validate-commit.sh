@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # gsd-hook-version: {{GSD_VERSION}}
 # gsd-validate-commit.sh — PreToolUse hook: enforce Conventional Commits format
 # Blocks git commit commands with non-conforming messages (exit 2).
@@ -21,8 +21,15 @@ INPUT=$(cat)
 # Extract command from JSON using Node (handles escaping correctly, no jq needed)
 CMD=$(echo "$INPUT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{process.stdout.write(JSON.parse(d).tool_input?.command||'')}catch{}})" 2>/dev/null)
 
-# Only check git commit commands
-if [[ "$CMD" =~ ^git[[:space:]]+commit ]]; then
+# Only check git commit commands.
+# Delegates to hooks/lib/git-cmd.js isGitSubcommand() — the canonical token-walk
+# classifier that handles env-prefix, -C path, and full-path git invocations.
+# A naive `^git\s+commit` regex misses all three; this guard fixes that (#3129).
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+if GIT_CMD_LIB="$HOOK_DIR/lib/git-cmd.js" node -e "
+  const {isGitSubcommand}=require(process.env.GIT_CMD_LIB);
+  process.exit(isGitSubcommand(process.argv[1],'commit')?0:1);
+" "$CMD" 2>/dev/null; then
   # Extract message from -m flag
   MSG=""
   if [[ "$CMD" =~ -m[[:space:]]+\"([^\"]+)\" ]]; then
@@ -35,11 +42,13 @@ if [[ "$CMD" =~ ^git[[:space:]]+commit ]]; then
     SUBJECT=$(echo "$MSG" | head -1)
     # Validate Conventional Commits format
     if ! [[ "$SUBJECT" =~ ^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\(.+\))?:[[:space:]].+ ]]; then
-      echo '{"decision": "block", "reason": "Commit message must follow Conventional Commits: <type>(<scope>): <subject>. Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore. Subject must be <=72 chars, lowercase, imperative mood, no trailing period."}'
+      # Emit a typed `code` field alongside `reason` (#2974). Tests assert
+      # on the stable code string; the reason is the human-readable copy.
+      echo '{"decision": "block", "code": "CONVENTIONAL_COMMITS_VIOLATION", "reason": "Commit message must follow Conventional Commits: <type>(<scope>): <subject>. Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore. Subject must be <=72 chars, lowercase, imperative mood, no trailing period."}'
       exit 2
     fi
     if [ ${#SUBJECT} -gt 72 ]; then
-      echo '{"decision": "block", "reason": "Commit subject must be 72 characters or less."}'
+      echo '{"decision": "block", "code": "COMMIT_SUBJECT_TOO_LONG", "reason": "Commit subject must be 72 characters or less."}'
       exit 2
     fi
   fi

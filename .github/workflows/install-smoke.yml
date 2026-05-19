@@ -1,0 +1,317 @@
+name: Install Smoke
+
+# Exercises the real install paths:
+#   tarball: `npm pack` → `npm install -g <tarball>` → assert gsd-sdk on PATH
+#   unpacked: `npm install -g <dir>` (no pack) → assert gsd-sdk on PATH + executable
+#
+# The tarball path is the canonical ship path. The unpacked path reproduces the
+# mode-644 failure class (issue #2453): npm does NOT chmod bin targets when
+# installing from an unpacked local directory, so any stale tsc output lacking
+# execute bits will be caught by the unpacked job before release.
+#
+# - PRs: path-filtered, minimal runner (ubuntu + Node LTS) for fast signal.
+# - Push to release branches / main: full matrix.
+# - workflow_call: invoked from release.yml as a pre-publish gate.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'bin/install.js'
+      - 'bin/gsd-sdk.js'
+      - 'sdk/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/release-tarball-smoke.cjs'
+      - 'tests/release-tarball-smoke.install.test.cjs'
+      - '.github/workflows/install-smoke.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches:
+      - main
+      - 'release/**'
+      - 'hotfix/**'
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (branch or SHA). Defaults to the triggering ref.'
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+
+concurrency:
+  group: install-smoke-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: tarball install (existing canonical path)
+  # ---------------------------------------------------------------------------
+  smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # PRs run the minimal path (ubuntu + LTS). Pushes / release branches
+        # and workflow_call add macOS + Node 24 coverage.
+        include:
+          - os: ubuntu-latest
+            node-version: 22
+            full_only: false
+          - os: ubuntu-latest
+            node-version: 24
+            full_only: true
+          - os: macos-latest
+            node-version: 24
+            full_only: true
+
+    steps:
+      - name: Skip full-only matrix entry on PR
+        id: skip
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL_ONLY: ${{ matrix.full_only }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ "$FULL_ONLY" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: steps.skip.outputs.skip != 'true'
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # Need enough history to merge origin/main for stale-base detection.
+          fetch-depth: 0
+
+      # The default `refs/pull/N/merge` ref GitHub produces for PRs is cached
+      # against the recorded merge-base, not current main. When main advances
+      # after the PR was opened, the merge ref stays stale and CI can fail on
+      # issues that were already fixed upstream. Explicitly merge current
+      # origin/main into the PR head so smoke always tests the PR against the
+      # latest trunk. If the merge conflicts, emit a clear "rebase onto main"
+      # diagnostic instead of a downstream build error that looks unrelated.
+      - name: Rebase check — merge origin/main into PR head
+        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.email "ci@gsd-build"
+          git config user.name "CI Rebase Check"
+          git fetch origin main
+          if ! git merge --no-edit --no-ff origin/main; then
+            echo "::error::This PR cannot cleanly merge origin/main. Rebase your branch onto current main and push again."
+            echo "::error::Conflicting files:"
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install root deps
+        if: steps.skip.outputs.skip != 'true'
+        run: npm ci
+
+      # Isolated SDK typecheck — if the build fails, emit a clear "stale base
+      # or real type error" diagnostic instead of letting the failure cascade
+      # into the tarball install step, where the downstream PATH assertion
+      # misreports it as "gsd-sdk not on PATH — installSdkIfNeeded regression".
+      - name: SDK typecheck (fails fast on type regressions)
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! npm run build:sdk; then
+            echo "::error::SDK build (npm run build:sdk) failed."
+            echo "::error::Common cause: your PR base is behind main and picks up intermediate type errors that are already fixed on trunk."
+            echo "::error::Fix: git fetch origin main && git rebase origin/main && git push --force-with-lease"
+            echo "::error::If the error persists on a fresh rebase, the type error is real — fix it in sdk/src/ and push."
+            exit 1
+          fi
+
+      - name: Pack root tarball
+        if: steps.skip.outputs.skip != 'true'
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --silent
+          TARBALL=$(ls get-shit-done-cc-*.tgz | head -1)
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "Packed: $TARBALL"
+
+      - name: Ensure npm global bin is on PATH (CI runner default may differ)
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        run: |
+          NPM_BIN="$(npm config get prefix)/bin"
+          echo "$NPM_BIN" >> "$GITHUB_PATH"
+          echo "npm global bin: $NPM_BIN"
+
+      - name: Install tarball globally
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          TMPDIR_ROOT=$(mktemp -d)
+          cd "$TMPDIR_ROOT"
+          npm install -g "$WORKSPACE/$TARBALL"
+          command -v get-shit-done-cc
+          # `--claude --local` is the non-interactive code path. Don't swallow
+          # non-zero exit — if the installer fails, that IS the CI failure, and
+          # its own error message is more useful than the downstream "shim
+          # regression" assertion masking the real cause.
+          if ! get-shit-done-cc --claude --local; then
+            echo "::error::get-shit-done-cc --claude --local failed. See the install.js output above for the real error (SDK build, PATH resolution, chmod, etc.)."
+            exit 1
+          fi
+
+      - name: Assert gsd-sdk resolves on PATH
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gsd-sdk >/dev/null 2>&1; then
+            echo "::error::gsd-sdk is not on PATH after tarball install — shim regression"
+            NPM_BIN="$(npm config get prefix)/bin"
+            echo "npm global bin: $NPM_BIN"
+            ls -la "$NPM_BIN" | grep -i gsd || true
+            exit 1
+          fi
+          echo "✓ gsd-sdk resolves at: $(command -v gsd-sdk)"
+
+      - name: Assert gsd-sdk is executable
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gsd-sdk --version || gsd-sdk --help
+          echo "✓ gsd-sdk is executable"
+
+      - name: Lifecycle smoke
+        if: steps.skip.outputs.skip != 'true'
+        id: lifecycle-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-tarball-smoke.cjs --json | tee /tmp/release-smoke.json
+          jq -e '.code == "ok"' /tmp/release-smoke.json
+
+      - name: Upload lifecycle smoke result on failure
+        if: steps.skip.outputs.skip != 'true' && failure() && steps.lifecycle-smoke.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-smoke-${{ matrix.os }}-node${{ matrix.node-version }}
+          path: /tmp/release-smoke.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Job 2: unpacked-dir install — reproduces the mode-644 failure class (#2453)
+  #
+  # `npm install -g <directory>` does NOT chmod bin targets when the source
+  # file was produced by a build script (tsc emits 0o644). This job catches
+  # regressions where sdk/dist/cli.js loses its execute bit before publish.
+  # ---------------------------------------------------------------------------
+  smoke-unpacked:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      # See the `smoke` job above for rationale — refs/pull/N/merge is cached
+      # against the recorded merge-base, not current main. Explicitly merge
+      # origin/main so smoke-unpacked also runs against the latest trunk.
+      - name: Rebase check — merge origin/main into PR head
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.email "ci@gsd-build"
+          git config user.name "CI Rebase Check"
+          git fetch origin main
+          if ! git merge --no-edit --no-ff origin/main; then
+            echo "::error::This PR cannot cleanly merge origin/main. Rebase your branch onto current main and push again."
+            echo "::error::Conflicting files:"
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Build SDK dist (sdk/dist is gitignored — must build for unpacked install)
+        run: npm run build:sdk
+
+      - name: Ensure npm global bin is on PATH
+        shell: bash
+        run: |
+          NPM_BIN="$(npm config get prefix)/bin"
+          echo "$NPM_BIN" >> "$GITHUB_PATH"
+          echo "npm global bin: $NPM_BIN"
+
+      - name: Strip execute bit from sdk/dist/cli.js to simulate tsc-fresh output
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Simulate the exact state tsc produces: cli.js at mode 644.
+          chmod 644 sdk/dist/cli.js
+          echo "Stripped execute bit: $(stat -c '%a' sdk/dist/cli.js 2>/dev/null || stat -f '%p' sdk/dist/cli.js)"
+
+      - name: Install from unpacked directory (no npm pack)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMPDIR_ROOT=$(mktemp -d)
+          cd "$TMPDIR_ROOT"
+          npm install -g "$GITHUB_WORKSPACE"
+          command -v get-shit-done-cc
+          get-shit-done-cc --claude --local || true
+
+      - name: Assert gsd-sdk resolves on PATH after unpacked install
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gsd-sdk >/dev/null 2>&1; then
+            echo "::error::gsd-sdk is not on PATH after unpacked install — #2453 regression"
+            NPM_BIN="$(npm config get prefix)/bin"
+            ls -la "$NPM_BIN" | grep -i gsd || true
+            exit 1
+          fi
+          echo "✓ gsd-sdk resolves at: $(command -v gsd-sdk)"
+
+      - name: Assert gsd-sdk is executable after unpacked install (#2453)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is the exact check that would have caught #2453 before release.
+          # The shim (bin/gsd-sdk.js) invokes sdk/dist/cli.js via `node`, so
+          # the execute bit on cli.js is not needed for the shim path. However
+          # installSdkIfNeeded() also chmods cli.js in-place as a safety net.
+          gsd-sdk --version || gsd-sdk --help
+          echo "✓ gsd-sdk is executable after unpacked install"

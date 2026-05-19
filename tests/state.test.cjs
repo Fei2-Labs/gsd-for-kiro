@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * GSD Tools Tests - State
  */
@@ -184,6 +188,98 @@ describe('state-snapshot command', () => {
     const result = runGsdTools(`state-snapshot --cwd "${invalid}"`, tmpDir);
     assert.ok(!result.success, 'should fail for invalid --cwd');
     assert.ok(result.error.includes('Invalid --cwd'), 'error should mention invalid --cwd');
+  });
+});
+
+// ─── Regression: #3265 — frontmatter wins over bold-body cell ─────────────
+
+describe('state-snapshot — bug #3265 frontmatter precedence', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('returns frontmatter status, not **Status:** value embedded in a body table cell', () => {
+    // Reproduce the collision: frontmatter says "executing", but the body
+    // contains a Markdown table cell with "**Status:** to ✅ COMPLETE ..."
+    // which stateExtractField (bold pattern) would match before the YAML line.
+    const stateContent = [
+      '---',
+      'gsd_state_version: 1.0',
+      'status: executing',
+      'current_plan: 19.5-05',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '## Recent Quick Tasks',
+      '',
+      '| Date | Task | Notes |',
+      '|------|------|-------|',
+      '| 2026-05-01 | Reopened Plan 19.5-05. **Status:** to ✅ COMPLETE | done |',
+      '',
+      '**Current Phase:** 19',
+      '**Current Plan:** archived-lane',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    // Frontmatter status must win over the table cell's **Status:** match
+    assert.strictEqual(output.status, 'executing', 'frontmatter status beats body table cell');
+  });
+
+  test('returns frontmatter current_plan, not bold body value when both present', () => {
+    const stateContent = [
+      '---',
+      'gsd_state_version: 1.0',
+      'status: executing',
+      'current_plan: 19.5-05',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '**Current Phase:** 19',
+      '**Current Plan:** archived-lane',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_plan, '19.5-05', 'frontmatter current_plan beats body bold value');
+  });
+
+  test('falls back to body extraction when no frontmatter block is present', () => {
+    const stateContent = [
+      '# Project State',
+      '',
+      '**Current Phase:** 07',
+      '**Status:** paused',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    // No frontmatter — body extraction must still work
+    assert.strictEqual(output.status, 'paused', 'body extraction works without frontmatter');
+    assert.strictEqual(output.current_phase, '07', 'body extraction works without frontmatter');
   });
 });
 
@@ -2145,6 +2241,382 @@ describe('state sync command', () => {
 
     const after = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
     assert.strictEqual(before, after, 'File should not be modified in verify mode');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bug #2444: stopped_at frontmatter must not be overwritten by historical body prose
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stopped_at frontmatter not overwritten by historical prose (bug #2444)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('state sync preserves correct stopped_at frontmatter when historical plain-text match appears before Session section', () => {
+    // The bug: body has plain "Stopped at:" in old notes (no bold) — stateExtractField
+    // uses a plain ^Stopped at:\s*(.+) pattern with /im which matches the first line,
+    // returning the stale historical value. syncStateFrontmatter has no preservation
+    // step for stopped_at like cmdStateJson does, so it overwrites the correct value.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `---
+gsd_state_version: '1.0'
+status: executing
+stopped_at: Phase 3, Plan 2 — current correct value
+---
+
+# Project State
+
+**Current Phase:** 03
+**Status:** In progress
+
+## Previous Session Notes
+
+Stopped at: Phase 5 complete — v1.0 shipped (OLD stale historical note)
+
+## Session
+
+Last Date: 2026-04-19
+Stopped At: Phase 3, Plan 2 — current correct value
+`
+    );
+
+    const result = runGsdTools('state sync', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    // The correct frontmatter value must survive the sync
+    assert.ok(
+      stateContent.includes('Phase 3, Plan 2 — current correct value'),
+      'stopped_at must retain the correct value from the ## Session section'
+    );
+    assert.ok(
+      !stateContent.includes('stopped_at: Phase 5 complete'),
+      'stopped_at must NOT be overwritten with the old historical note'
+    );
+  });
+
+  test('state sync does not promote stale body prose to stopped_at frontmatter when frontmatter has no stopped_at', () => {
+    // No existing stopped_at in frontmatter, body has plain Stopped at: in
+    // a historical notes section appearing BEFORE the real ## Session entry.
+    // buildStateFrontmatter should scope extraction to ## Session section, not
+    // match the first occurrence anywhere in the body.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `---
+gsd_state_version: '1.0'
+status: executing
+---
+
+# Project State
+
+**Current Phase:** 03
+**Status:** In progress
+
+## Old Notes
+
+Stopped at: Phase 5 complete — v1.0 STALE (should never land in frontmatter)
+
+## Session
+
+Last Date: 2026-04-19
+Stopped At: Phase 3, Plan 1 — real current value
+`
+    );
+
+    const syncResult = runGsdTools('state sync', tmpDir);
+    assert.ok(syncResult.success, `state sync failed: ${syncResult.error}`);
+
+    const jsonResult = runGsdTools('state json', tmpDir);
+    assert.ok(jsonResult.success, `state json failed: ${jsonResult.error}`);
+    const output = JSON.parse(jsonResult.output);
+
+    assert.strictEqual(output.stopped_at, 'Phase 3, Plan 1 — real current value',
+      'stopped_at must be extracted from ## Session section, not the first plain-text match in the body');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bug #2445: stale phase dirs from closed milestone inflate phase counts
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stale phase dirs do not corrupt phase counts (bug #2445)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('state json excludes stale prior-milestone phase dirs from phase count when ROADMAP scopes current milestone', () => {
+    // Old milestone had phases 1-5; new milestone starts fresh with phases 1-2.
+    // Stale dirs for old phases 3, 4, 5 remain in .planning/phases/ and must be
+    // excluded by getMilestonePhaseFilter (new ROADMAP only lists phases 1 and 2).
+    // Old phases 1 and 2 dirs are ambiguous (same number reused) but phase 3-5 dirs
+    // must not inflate total_phases beyond the ROADMAP's phaseCount of 2.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '<details>',
+        '<summary>v1.0 — Old Milestone (Shipped)</summary>',
+        '',
+        '## Roadmap v1.0: Old Milestone',
+        '### Phase 1: Old Foundation',
+        '### Phase 2: Old API',
+        '### Phase 3: Old Deploy',
+        '### Phase 4: Old Polish',
+        '### Phase 5: Old Wrap',
+        '',
+        '</details>',
+        '',
+        '## Roadmap v2.0: New Milestone',
+        '### Phase 1: New Foundation',
+        '### Phase 2: New API',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v2.0\n---\n\n# State\n\n**Current Phase:** 01\n**Status:** Planning\n'
+    );
+
+    // Create stale v1.0 phase dirs 3, 4, 5 — these are NOT in the new ROADMAP
+    const phasesDir = path.join(tmpDir, '.planning', 'phases');
+    for (const dir of ['03-old-deploy', '04-old-polish', '05-old-wrap']) {
+      const d = path.join(phasesDir, dir);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, `${dir.slice(0, 2)}-01-PLAN.md`), '# stale plan\n');
+    }
+
+    // New milestone has only Phase 1 started so far
+    const newPhaseDir = path.join(phasesDir, '01-new-foundation');
+    fs.mkdirSync(newPhaseDir, { recursive: true });
+    fs.writeFileSync(path.join(newPhaseDir, '01-01-PLAN.md'), '# new plan\n');
+
+    const result = runGsdTools('state json', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+
+    // total_phases must be bounded by the ROADMAP's 2 phases, not 4 total dirs
+    // (the 3 stale dirs for phases 3-5 must be excluded by the milestone filter)
+    assert.ok(
+      output.progress && output.progress.total_phases <= 2,
+      `total_phases should be ≤ 2 (new milestone phases 1-2 only), got ${output.progress?.total_phases}`
+    );
+    // total_plans must only count plans from current-milestone phase dirs
+    assert.ok(
+      output.progress && output.progress.total_plans <= 1,
+      `total_plans should be 1 (only new phase 1 dir), got ${output.progress?.total_plans}`
+    );
+  });
+
+  test('init new-milestone phase_dir_count excludes stale prior-milestone dirs', () => {
+    // ROADMAP scoped to v2.0 with 2 phases
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '<details>',
+        '<summary>v1.0 — Shipped</summary>',
+        '',
+        '## Roadmap v1.0: Old',
+        '### Phase 1: Old One',
+        '### Phase 2: Old Two',
+        '### Phase 3: Old Three',
+        '',
+        '</details>',
+        '',
+        '## Roadmap v2.0: New',
+        '### Phase 1: New One',
+        '### Phase 2: New Two',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      '---\nmilestone: v2.0\n---\n\n# State\n\n**Status:** Planning\n'
+    );
+
+    // Three stale phase dirs from the old milestone
+    const phasesDir = path.join(tmpDir, '.planning', 'phases');
+    for (const dir of ['01-old-one', '02-old-two', '03-old-three']) {
+      fs.mkdirSync(path.join(phasesDir, dir), { recursive: true });
+    }
+
+    const result = runGsdTools('init new-milestone', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+
+    // phase_dir_count should not include stale dirs from the old milestone
+    assert.ok(
+      output.phase_dir_count <= 2,
+      `phase_dir_count should be ≤ 2 (only new-milestone dirs), got ${output.phase_dir_count}`
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// state complete-phase: Phase-fallback decoration handling (PR #2761 nitpick)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// When STATE.md is missing the canonical `**Current Phase:**` field but
+// includes a decorated `## Current Position` body line, the fallback path used
+// to leak the decoration into downstream Status/Phase strings — producing
+// `**Status:** Phase 01 (Foo) — EXECUTING complete` instead of the expected
+// `**Status:** Phase 01 complete`. CodeRabbit flagged this on PR #2761 and the
+// Phase fallback now strips everything past the leading numeric/decimal token.
+describe('state complete-phase: decorated Phase fallback (#2761 nitpick)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('writes clean Phase identifier when only Current Position decoration is present', () => {
+    // STATE.md without the canonical `**Current Phase:**` field — the only
+    // phase signal lives inside the `## Current Position` block as a decorated
+    // line. This is the regression fixture.
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 01 (Foo) — EXECUTING',
+      'Plan: bootstrap',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateMd);
+
+    const result = runGsdTools('state complete-phase', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      'utf-8',
+    );
+
+    // Status should reference the bare phase identifier (`01`), not the
+    // decorated string. The negative assertion catches the regression
+    // shape directly.
+    assert.ok(
+      updated.includes('**Status:** Phase 01 complete'),
+      `Status should be "Phase 01 complete", got STATE.md:\n${updated}`,
+    );
+    assert.ok(
+      !updated.includes('Phase 01 (Foo) — EXECUTING complete'),
+      `Status must not embed Current Position decoration: ${updated}`,
+    );
+  });
+
+  test('canonical Current Phase field is preferred over Current Position decoration', () => {
+    // When both are present, Current Phase wins — same outcome as before, but
+    // pinned here so a future refactor that flips precedence is caught.
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Current Phase:** 03',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 01 (Foo) — EXECUTING',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateMd);
+
+    const result = runGsdTools('state complete-phase', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      'utf-8',
+    );
+    assert.ok(
+      updated.includes('**Status:** Phase 03 complete'),
+      `Status should reference canonical Current Phase (03), got: ${updated}`,
+    );
+  });
+
+  test('rejects unresolved literal Phase token and does not corrupt STATE.md (#3063)', () => {
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: narrative only',
+      '',
+    ].join('\n');
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, stateMd);
+
+    const result = runGsdTools('state complete-phase', tmpDir);
+    assert.ok(result.success, 'command should return JSON error payload, not crash');
+    const output = JSON.parse(result.output);
+    assert.ok(output.error, 'expected clear resolution error');
+
+    const after = fs.readFileSync(statePath, 'utf-8');
+    assert.ok(!after.includes('Phase: Phase — COMPLETE'));
+    assert.ok(!after.includes('Status: Phase Phase complete'));
+  });
+
+  test('supports explicit phase override for complete-phase disambiguation (#3063)', () => {
+    const stateMd = [
+      '---',
+      'milestone: v1.0',
+      '---',
+      '',
+      '# State',
+      '',
+      '**Status:** Executing',
+      '**Last Activity:** 2024-01-15',
+      '',
+      '## Current Position',
+      '',
+      'Phase: narrative only',
+      '',
+    ].join('\n');
+    const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+    fs.writeFileSync(statePath, stateMd);
+
+    const result = runGsdTools('state complete-phase --phase 3.3', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const after = fs.readFileSync(statePath, 'utf-8');
+    assert.ok(after.includes('**Status:** Phase 3.3 complete'));
   });
 });
 

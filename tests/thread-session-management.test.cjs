@@ -1,5 +1,9 @@
 'use strict';
 
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -7,7 +11,7 @@ const path = require('path');
 
 describe('thread session management (#2156)', () => {
   const threadCmd = fs.readFileSync(
-    path.join(__dirname, '..', 'commands', 'gsd', 'thread.md'),
+    path.join(__dirname, '..', 'get-shit-done', 'workflows', 'thread.md'),
     'utf8'
   );
 
@@ -66,8 +70,8 @@ describe('thread session management (#2156)', () => {
 
   test('thread command list reads frontmatter status', () => {
     assert.ok(
-      threadCmd.includes('frontmatter get'),
-      'list mode should read status via frontmatter get'
+      threadCmd.includes('frontmatter get') || threadCmd.includes('frontmatter.get'),
+      'list mode should read status via frontmatter get / frontmatter.get'
     );
   });
 

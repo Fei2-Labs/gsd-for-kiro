@@ -1,3 +1,13 @@
+// allow-test-rule: integration-test-input
+// Reads shipped source files (commands/gsd/*.md, agents/*.md, bin/install.js) as
+// real test fixture input for installer/converter functions like
+// convertClaudeToCopilotContent() and the install.js plumbing. Those files are
+// not inspected for string presence; they are inputs whose *transformation* or
+// installation behavior is being asserted. The converter-purity test on
+// bin/lib/*.cjs uses a synthetic input string instead (per #3584:
+// runtime-slash.cjs eliminated literal /gsd: refs from runtime CJS, so reading
+// verify.cjs is no longer a meaningful fixture for testing the converter).
+
 /**
  * GSD Tools Tests - Copilot Install Plumbing
  *
@@ -14,6 +24,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { parseFrontmatter, createTempDir, cleanup } = require('./helpers.cjs');
 
 const {
   getDirName,
@@ -24,14 +35,20 @@ const {
   convertClaudeToCopilotContent,
   convertClaudeCommandToCopilotSkill,
   convertClaudeAgentToCopilotAgent,
-  copyCommandsAsCopilotSkills,
   GSD_COPILOT_INSTRUCTIONS_MARKER,
   GSD_COPILOT_INSTRUCTIONS_CLOSE_MARKER,
   mergeCopilotInstructions,
   stripGsdFromCopilotInstructions,
   writeManifest,
   reportLocalPatches,
+  installRuntimeArtifacts,
 } = require('../bin/install.js');
+
+// ─── Profile resolution for installRuntimeArtifacts tests ────────────────────
+const _gsdLibDir = path.join(__dirname, '..', 'get-shit-done', 'bin', 'lib');
+const { loadSkillsManifest, resolveProfile } = require(path.join(_gsdLibDir, 'install-profiles.cjs'));
+const _manifest = loadSkillsManifest();
+const resolvedProfileFull = resolveProfile({ modes: [], manifest: _manifest });
 
 // ─── getDirName ─────────────────────────────────────────────────────────────────
 
@@ -362,9 +379,10 @@ allowed-tools:
 Body content here referencing ~/.claude/foo and gsd:health.`;
 
     const result = convertClaudeCommandToCopilotSkill(input, 'gsd-health');
-    assert.ok(result.startsWith('---\nname: gsd-health\n'), 'name uses param');
-    assert.ok(result.includes('description: Diagnose planning directory health'), 'description preserved');
-    assert.ok(result.includes('argument-hint: "[--repair]"'), 'argument-hint double-quoted');
+    const fm = parseFrontmatter(result);
+    assert.equal(fm.name, 'gsd-health', 'name uses param');
+    assert.equal(fm.description, 'Diagnose planning directory health', 'description preserved (quoted per #2876)');
+    assert.equal(fm['argument-hint'], '[--repair]', 'argument-hint round-trips');
     assert.ok(result.includes('allowed-tools: Read, Bash, Write, AskUserQuestion'), 'tools comma-separated');
     assert.ok(result.includes('.github/foo'), 'CONV-06 applied to body (local mode default)');
     assert.ok(result.includes('gsd-health'), 'CONV-07 applied to body');
@@ -380,9 +398,10 @@ description: Show available GSD commands
 Help content.`;
 
     const result = convertClaudeCommandToCopilotSkill(input, 'gsd-help');
-    assert.ok(result.includes('name: gsd-help'), 'name set');
-    assert.ok(result.includes('description: Show available GSD commands'), 'description preserved');
-    assert.ok(!result.includes('allowed-tools:'), 'no allowed-tools line');
+    const fm = parseFrontmatter(result);
+    assert.equal(fm.name, 'gsd-help', 'name set');
+    assert.equal(fm.description, 'Show available GSD commands', 'description preserved');
+    assert.ok(!('allowed-tools' in fm), 'no allowed-tools line');
   });
 
   test('handles skill without argument-hint', () => {
@@ -524,9 +543,10 @@ color: yellow
 Body.`;
 
     const result = convertClaudeAgentToCopilotAgent(input);
-    assert.ok(result.includes('name: gsd-executor'), 'name preserved');
-    assert.ok(result.includes('description: Executes GSD plans with atomic commits'), 'description preserved');
-    assert.ok(result.includes('color: yellow'), 'color preserved');
+    const fm = parseFrontmatter(result);
+    assert.equal(fm.name, 'gsd-executor', 'name preserved');
+    assert.equal(fm.description, 'Executes GSD plans with atomic commits', 'description preserved');
+    assert.equal(fm.color, 'yellow', 'color preserved');
   });
 
   test('handles mcp__context7__ tools', () => {
@@ -596,41 +616,46 @@ Check ~/.claude/settings and run gsd:health.`;
   });
 });
 
-// ─── copyCommandsAsCopilotSkills (integration) ─────────────────────────────────
+// ─── installRuntimeArtifacts (copilot integration) ─────────────────────────────
 
-describe('copyCommandsAsCopilotSkills', () => {
+describe('installRuntimeArtifacts (copilot integration)', () => {
+  // Pivoted from copyCommandsAsCopilotSkills(srcDir, tempDir, 'gsd') shim to
+  // installRuntimeArtifacts('copilot', configDir, 'global', resolvedProfileFull).
+  // Output layout: <configDir>/skills/gsd-<stem>/SKILL.md (destSubpath='skills', prefix='gsd-').
   const srcDir = path.join(__dirname, '..', 'commands', 'gsd');
-  let tempDir;
+  let configDir;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-copilot-skills-'));
+    configDir = createTempDir('gsd-copilot-skills-');
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanup(configDir);
   });
 
   test('creates skill folders from source commands', () => {
-    copyCommandsAsCopilotSkills(srcDir, tempDir, 'gsd');
+    installRuntimeArtifacts('copilot', configDir, 'global', resolvedProfileFull);
 
+    const skillsDir = path.join(configDir, 'skills');
     // Check specific folders exist
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-health')), 'gsd-health folder exists');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-health', 'SKILL.md')), 'gsd-health/SKILL.md exists');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-help')), 'gsd-help folder exists');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-progress')), 'gsd-progress folder exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-health')), 'gsd-health folder exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-health', 'SKILL.md')), 'gsd-health/SKILL.md exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-help')), 'gsd-help folder exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-progress')), 'gsd-progress folder exists');
 
     // Count gsd-* directories — should match number of source command files
-    const dirs = fs.readdirSync(tempDir, { withFileTypes: true })
+    const dirs = fs.readdirSync(skillsDir, { withFileTypes: true })
       .filter(e => e.isDirectory() && e.name.startsWith('gsd-'));
-    const expectedSkillCount = fs.readdirSync(path.join(__dirname, '..', 'commands', 'gsd'))
+    const expectedSkillCount = fs.readdirSync(srcDir)
       .filter(f => f.endsWith('.md')).length;
     assert.strictEqual(dirs.length, expectedSkillCount, `expected ${expectedSkillCount} skill folders, got ${dirs.length}`);
   });
 
   test('skill content has Copilot frontmatter format', () => {
-    copyCommandsAsCopilotSkills(srcDir, tempDir, 'gsd');
+    installRuntimeArtifacts('copilot', configDir, 'global', resolvedProfileFull);
 
-    const skillContent = fs.readFileSync(path.join(tempDir, 'gsd-health', 'SKILL.md'), 'utf8');
+    const skillsDir = path.join(configDir, 'skills');
+    const skillContent = fs.readFileSync(path.join(skillsDir, 'gsd-health', 'SKILL.md'), 'utf8');
     // Frontmatter format checks
     assert.ok(skillContent.startsWith('---\nname: gsd-health\n'), 'starts with name: gsd-health');
     assert.ok(skillContent.includes('allowed-tools: Read, Bash, Write, AskUserQuestion'),
@@ -646,22 +671,27 @@ describe('copyCommandsAsCopilotSkills', () => {
     const srcFile = path.join(srcDir, 'autonomous.md');
     assert.ok(fs.existsSync(srcFile), 'commands/gsd/autonomous.md must exist as source');
 
-    copyCommandsAsCopilotSkills(srcDir, tempDir, 'gsd');
+    installRuntimeArtifacts('copilot', configDir, 'global', resolvedProfileFull);
 
+    const skillsDir = path.join(configDir, 'skills');
     // Skill folder and file created
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-autonomous')), 'gsd-autonomous folder exists');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-autonomous', 'SKILL.md')), 'gsd-autonomous/SKILL.md exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-autonomous')), 'gsd-autonomous folder exists');
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-autonomous', 'SKILL.md')), 'gsd-autonomous/SKILL.md exists');
 
-    const skillContent = fs.readFileSync(path.join(tempDir, 'gsd-autonomous', 'SKILL.md'), 'utf8');
+    const skillContent = fs.readFileSync(path.join(skillsDir, 'gsd-autonomous', 'SKILL.md'), 'utf8');
+    const fm = parseFrontmatter(skillContent);
 
     // Frontmatter: name converted from gsd:autonomous to gsd-autonomous
-    assert.ok(skillContent.startsWith('---\nname: gsd-autonomous\n'), 'name is gsd-autonomous');
-    assert.ok(skillContent.includes('description: Run all remaining phases autonomously'),
-      'description preserved');
-    // argument-hint present and double-quoted
-    assert.ok(skillContent.includes('argument-hint: "[--from N] [--to N] [--only N] [--interactive]"'), 'argument-hint present and quoted');
+    assert.equal(fm.name, 'gsd-autonomous', 'name is gsd-autonomous');
+    assert.equal(
+      fm.description,
+      'Run all remaining phases autonomously — discuss→plan→execute per phase',
+      'description preserved (round-trips through #2876 yamlQuote)',
+    );
+    // argument-hint round-trips
+    assert.equal(fm['argument-hint'], '[--from N] [--to N] [--only N] [--interactive]', 'argument-hint round-trips');
     // allowed-tools comma-separated
-    assert.ok(skillContent.includes('allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion, Task'),
+    assert.ok(skillContent.includes('allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion, Agent'),
       'allowed-tools is comma-separated');
     // No Claude-format remnants
     assert.ok(!skillContent.includes('allowed-tools:\n  -'), 'NOT YAML multiline format');
@@ -686,16 +716,26 @@ describe('copyCommandsAsCopilotSkills', () => {
   });
 
   test('cleans up old skill directories on re-run', () => {
-    // Create a fake old directory
-    fs.mkdirSync(path.join(tempDir, 'gsd-fake-old'), { recursive: true });
-    fs.writeFileSync(path.join(tempDir, 'gsd-fake-old', 'SKILL.md'), 'old');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-fake-old')), 'fake old dir exists before');
+    const skillsDir = path.join(configDir, 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
 
-    // Run copy — should clean up old dirs
-    copyCommandsAsCopilotSkills(srcDir, tempDir, 'gsd');
+    // Stale GSD-managed dir must be pruned
+    const staleDir = path.join(skillsDir, 'gsd-old-stale-skill');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'SKILL.md'), 'stale content');
 
-    assert.ok(!fs.existsSync(path.join(tempDir, 'gsd-fake-old')), 'fake old dir removed');
-    assert.ok(fs.existsSync(path.join(tempDir, 'gsd-health')), 'real dirs still exist');
+    // Non-GSD dir should survive (installRuntimeArtifacts never prunes non-gsd-*)
+    fs.mkdirSync(path.join(skillsDir, 'user-custom'), { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'user-custom', 'SKILL.md'), 'user content');
+
+    installRuntimeArtifacts('copilot', configDir, 'global', resolvedProfileFull);
+
+    // Real skills are present after install
+    assert.ok(fs.existsSync(path.join(skillsDir, 'gsd-health')), 'real dirs still exist');
+    // Stale GSD-prefixed dir is removed by pre-prune
+    assert.ok(!fs.existsSync(staleDir), 'stale gsd-* dir removed by pre-prune');
+    // Non-GSD dir is preserved
+    assert.ok(fs.existsSync(path.join(skillsDir, 'user-custom')), 'non-GSD dir preserved');
   });
 });
 
@@ -786,14 +826,24 @@ describe('Copilot content conversion - engine files', () => {
   });
 
   test('converts engine .cjs files correctly', () => {
-    const verifyCjs = fs.readFileSync(
-      path.join(__dirname, '..', 'get-shit-done', 'bin', 'lib', 'verify.cjs'), 'utf8'
-    );
-    const result = convertClaudeToCopilotContent(verifyCjs);
+    // #3584: bin/lib/*.cjs no longer hardcodes `/gsd:<cmd>` literals — runtime
+    // emissions now flow through `runtime-slash.cjs::formatGsdSlash()` which
+    // already produces the runtime-routable shape. The Copilot install
+    // converter still needs to handle source files that DO contain literal
+    // colon-form references (commands/gsd/*.md, workflow .md files, etc.), so
+    // assert the converter contract against a synthetic input that mirrors the
+    // shape those files have.
+    const synthetic = [
+      'Run /gsd:new-project to initialize.',
+      'On error, run /gsd:health --repair to regenerate.',
+      'For phase work, use /gsd:execute-phase 1.',
+    ].join('\n');
+    const result = convertClaudeToCopilotContent(synthetic);
 
-    assert.ok(!result.match(/gsd:[a-z]/), 'no gsd: references remain');
-    assert.ok(result.includes('gsd-new-project'), 'gsd:new-project converted');
-    assert.ok(result.includes('gsd-health'), 'gsd:health converted');
+    assert.ok(!result.match(/gsd:[a-z]/), 'no gsd: references remain after conversion');
+    assert.ok(result.includes('gsd-new-project'), 'gsd:new-project converted to hyphen form');
+    assert.ok(result.includes('gsd-health'), 'gsd:health converted to hyphen form');
+    assert.ok(result.includes('gsd-execute-phase'), 'gsd:execute-phase converted to hyphen form');
   });
 });
 
@@ -1064,7 +1114,7 @@ describe('Copilot manifest and patches fixes', () => {
       console.log = originalLog;
     });
 
-    test('reportLocalPatches shows /gsd-reapply-patches for Copilot', () => {
+    test('reportLocalPatches shows /gsd-update --reapply for Copilot', () => {
       // Create patches directory with metadata
       const patchesDir = path.join(tmpDir, 'gsd-local-patches');
       fs.mkdirSync(patchesDir, { recursive: true });
@@ -1077,11 +1127,15 @@ describe('Copilot manifest and patches fixes', () => {
 
       assert.ok(result.length > 0, 'returns patched files list');
       const output = logs.join('\n');
-      assert.ok(output.includes('/gsd-reapply-patches'), 'uses dash format for Copilot');
+      // Asserts the consolidated form. /gsd-reapply-patches was removed in
+      // 1.39 (PR #2824) and folded into a flag on /gsd-update — see #3010.
+      // Negative assertion guards against regression to the dead command.
+      assert.ok(output.includes('/gsd-update --reapply'), 'uses consolidated /gsd-update --reapply form for Copilot');
+      assert.ok(!output.includes('/gsd-reapply-patches'), 'does not reference removed /gsd-reapply-patches command');
       assert.ok(!output.includes('/gsd:reapply-patches'), 'does not use colon format');
     });
 
-    test('reportLocalPatches shows /gsd-reapply-patches for Claude', () => {
+    test('reportLocalPatches shows /gsd-update --reapply for Claude', () => {
       // Create patches directory with metadata
       const patchesDir = path.join(tmpDir, 'gsd-local-patches');
       fs.mkdirSync(patchesDir, { recursive: true });
@@ -1094,7 +1148,8 @@ describe('Copilot manifest and patches fixes', () => {
 
       assert.ok(result.length > 0, 'returns patched files list');
       const output = logs.join('\n');
-      assert.ok(output.includes('/gsd-reapply-patches'), 'uses hyphen format for Claude');
+      assert.ok(output.includes('/gsd-update --reapply'), 'uses consolidated /gsd-update --reapply form for Claude');
+      assert.ok(!output.includes('/gsd-reapply-patches'), 'does not reference removed /gsd-reapply-patches command');
       assert.ok(!output.includes('/gsd:reapply-patches'), 'does not use colon format for Claude');
     });
   });
@@ -1116,7 +1171,7 @@ const EXPECTED_AGENTS = fs.readdirSync(path.join(__dirname, '..', 'agents'))
 function runCopilotInstall(cwd) {
   const env = { ...process.env };
   delete env.GSD_TEST_MODE;
-  return execFileSync(process.execPath, [INSTALL_PATH, '--copilot', '--local'], {
+  return execFileSync(process.execPath, [INSTALL_PATH, '--copilot', '--local', '--no-sdk'], {
     cwd,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -1127,7 +1182,7 @@ function runCopilotInstall(cwd) {
 function runCopilotUninstall(cwd) {
   const env = { ...process.env };
   delete env.GSD_TEST_MODE;
-  return execFileSync(process.execPath, [INSTALL_PATH, '--copilot', '--local', '--uninstall'], {
+  return execFileSync(process.execPath, [INSTALL_PATH, '--copilot', '--local', '--uninstall', '--no-sdk'], {
     cwd,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -1187,6 +1242,8 @@ describe('E2E: Copilot full install verification', () => {
       'gsd-codebase-mapper.agent.md',
       'gsd-debug-session-manager.agent.md',
       'gsd-debugger.agent.md',
+      'gsd-doc-classifier.agent.md',
+      'gsd-doc-synthesizer.agent.md',
       'gsd-doc-verifier.agent.md',
       'gsd-doc-writer.agent.md',
       'gsd-domain-researcher.agent.md',
@@ -1374,7 +1431,7 @@ describe('E2E: Copilot uninstall verification', () => {
 function runClaudeInstall(cwd) {
   const env = { ...process.env };
   delete env.GSD_TEST_MODE;
-  return execFileSync(process.execPath, [INSTALL_PATH, '--claude', '--local'], {
+  return execFileSync(process.execPath, [INSTALL_PATH, '--claude', '--local', '--no-sdk'], {
     cwd,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -1385,7 +1442,7 @@ function runClaudeInstall(cwd) {
 function runClaudeUninstall(cwd) {
   const env = { ...process.env };
   delete env.GSD_TEST_MODE;
-  return execFileSync(process.execPath, [INSTALL_PATH, '--claude', '--local', '--uninstall'], {
+  return execFileSync(process.execPath, [INSTALL_PATH, '--claude', '--local', '--uninstall', '--no-sdk'], {
     cwd,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],

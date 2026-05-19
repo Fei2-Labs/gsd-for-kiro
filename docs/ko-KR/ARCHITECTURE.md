@@ -411,7 +411,7 @@ UI-SPEC.md (per phase) ───────────────────
 │   ├── pending/            # 캡처된 아이디어
 │   └── done/               # 완료된 할 일
 ├── threads/               # 영구 컨텍스트 스레드 (/gsd-thread에서)
-├── seeds/                 # 미래 지향적 아이디어 (/gsd-plant-seed에서)
+├── seeds/                 # 미래 지향적 아이디어 (/gsd-capture --seed에서)
 ├── debug/                  # 활성 디버그 세션
 │   ├── *.md                # 활성 세션
 │   ├── resolved/           # 보관된 세션
@@ -439,7 +439,7 @@ UI-SPEC.md (per phase) ───────────────────
    - Antigravity: Google 모델 등가물을 사용한 skills-first 방식
 5. **경로 정규화** — `~/.claude/` 경로를 런타임별 경로로 교체
 6. **설정 통합** — 런타임의 `settings.json`에 훅 등록
-7. **패치 백업** — v1.17부터 로컬 수정 파일을 `gsd-local-patches/`에 백업하여 `/gsd-reapply-patches`에 사용
+7. **패치 백업** — v1.17부터 로컬 수정 파일을 `gsd-local-patches/`에 백업하여 `/gsd-update --reapply`에 사용
 8. **매니페스트 추적** — 깔끔한 제거를 위해 `gsd-file-manifest.json` 작성
 9. **제거 모드** — `--uninstall`로 모든 GSD 파일, 훅, 설정 제거
 

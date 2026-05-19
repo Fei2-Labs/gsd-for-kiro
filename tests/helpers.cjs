@@ -61,12 +61,13 @@ function runGsdTools(args, cwd = process.cwd(), env = {}) {
         env: childEnv,
       });
     }
-    return { success: true, output: result.trim() };
+    return { success: true, output: result.trim(), exitCode: 0 };
   } catch (err) {
     return {
       success: false,
       output: err.stdout?.toString().trim() || '',
       error: err.stderr?.toString().trim() || err.message,
+      exitCode: err.status ?? 1,
     };
   }
 }
@@ -105,7 +106,155 @@ function createTempGitProject(prefix = 'gsd-test-') {
 }
 
 function cleanup(tmpDir) {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (typeof tmpDir !== 'string' || tmpDir.length === 0) return;
+  const target = path.resolve(tmpDir);
+  const cwd = path.resolve(process.cwd());
+  if (cwd === target || cwd.startsWith(`${target}${path.sep}`)) {
+    // Windows cannot remove a directory that is the current working directory.
+    process.chdir(path.dirname(target));
+  }
+  // maxRetries/retryDelay absorbs transient Windows EBUSY where AV scanners,
+  // file-indexers, or just-exited child processes still hold handles when
+  // teardown runs. On POSIX the retry loop is a no-op (rmSync succeeds first try).
+  // Budget: 20 × 250ms = 5s total — Windows Defender's deferred scan can hold
+  // newly-written files for several seconds on cold runners.
+  fs.rmSync(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, TOOLS_PATH };
+/**
+ * Parse a Markdown frontmatter block into a flat key→value map.
+ *
+ * Handles the YAML scalar forms emitted by the install converters:
+ *   key: "json-encoded value"   → JSON.parse
+ *   key: 'value with ''escape'' → strip quotes, unescape ''
+ *   key: bare value             → trimmed string
+ *
+ * Multi-line and block scalars are out of scope — every converter in
+ * `bin/install.js` emits single-line scalars only. Throws if the content
+ * has no closed `---` block so a regression in the emitter shape fails
+ * loudly rather than silently returning {}.
+ *
+ * Tests use this helper instead of `result.includes('key: value')` to
+ * follow the project's "tests parse, never grep" convention.
+ *
+ * @param {string} content - Full file content beginning with `---`.
+ * @returns {Record<string, string>} Map of frontmatter keys to decoded values.
+ */
+function parseFrontmatter(content) {
+  if (!content.startsWith('---')) {
+    throw new Error(`parseFrontmatter: content must start with '---', got: ${content.slice(0, 40)}`);
+  }
+  // CRLF tolerance: a Windows-authored file split on `\n` would leave a
+  // trailing `\r` on every line, making `lines[i] === '---'` fail to
+  // recognize delimiters. Same goes for whitespace-padded delimiter lines.
+  // Normalize via a CRLF-aware split + trimmed comparison.
+  const lines = content.split(/\r?\n/);
+  let openIdx = -1;
+  let closeIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() === '---') {
+      if (openIdx === -1) openIdx = i;
+      else { closeIdx = i; break; }
+    }
+  }
+  if (openIdx === -1 || closeIdx === -1) {
+    throw new Error('parseFrontmatter: no closed --- block');
+  }
+  const fields = {};
+  for (const line of lines.slice(openIdx + 1, closeIdx)) {
+    const match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/);
+    if (!match) continue; // skip block-list items, blank lines, comments
+    const [, key, rawValue] = match;
+    const value = rawValue.trim();
+    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+      fields[key] = JSON.parse(value);
+    } else if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+      fields[key] = value.slice(1, -1).replace(/''/g, "'");
+    } else {
+      fields[key] = value;
+    }
+  }
+  return fields;
+}
+
+// #3026 CR: shared `--help` output check used by bug-1818 + bug-3019 tests.
+// Render-on-help shape is `Usage: gsd-tools …\nCommands: …` — both lines
+// must be present; structural test, not prose substring matching.
+function isUsageOutput(text) {
+  return /Usage:\s*gsd-tools/.test(text) && /Commands:/.test(text);
+}
+
+/**
+ * Run `fn` with console.log/warn/error captured, returning {stdout, stderr}
+ * with ANSI colors stripped. Re-throws any exception fn threw AFTER restoring
+ * the real console so the caller's assertion path sees the failure (without
+ * this, a fn that crashes before printing would falsely pass !hasReady-style
+ * assertions). #2775 CR follow-up established this exact contract.
+ *
+ * Previously duplicated in bug-2775, bug-2829, bug-3033, bug-3211, bug-3231,
+ * bug-3359, and installer-migration-install-integration.
+ */
+function captureConsole(fn) {
+  const stdout = [];
+  const stderr = [];
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = (...a) => stdout.push(a.join(' '));
+  console.warn = (...a) => stderr.push(a.join(' '));
+  console.error = (...a) => stderr.push(a.join(' '));
+  let threw = null;
+  try {
+    fn();
+  } catch (e) {
+    threw = e;
+  } finally {
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+  }
+  if (threw) throw threw;
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  return {
+    stdout: stdout.map(strip).join('\n'),
+    stderr: stderr.map(strip).join('\n'),
+  };
+}
+
+/**
+ * Normalize platform path separators to POSIX forward slashes. Use for
+ * cross-platform path comparisons in test assertions where the runtime
+ * emits the platform-native separator (\ on Windows) but the test
+ * fixture or expected literal is POSIX. Returns the input unchanged if
+ * null/undefined so it composes safely with optional chaining.
+ */
+function toPosixPath(p) {
+  return p == null ? p : p.split(path.sep).join('/');
+}
+
+/**
+ * Run an npm command via execFileSync with cross-platform portability.
+ *
+ * Handles the Windows `npm.cmd` vs POSIX `npm` distinction and the
+ * `shell: true` requirement on Windows so tests do not need to
+ * re-implement platform detection inline.
+ *
+ * @param {string[]} args - npm subcommand and flags (e.g. ['pack', '--pack-destination', dir]).
+ * @param {object} [options] - execFileSync options merged with platform defaults.
+ *   `cwd`, `encoding`, `timeout`, and `env` are the commonly overridden keys.
+ * @returns {string} trimmed stdout string (encoding: 'utf-8').
+ * @throws {Error} re-throws the execFileSync error on non-zero exit so callers
+ *   get the full stderr in the error message.
+ */
+function runNpm(args, options = {}) {
+  const isWindows = process.platform === 'win32';
+  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+  const defaults = {
+    encoding: 'utf-8',
+    shell: isWindows,
+    timeout: 180000,
+  };
+  return execFileSync(npmCmd, args, { ...defaults, ...options }).trim();
+}
+
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, runNpm, TOOLS_PATH };

@@ -11,7 +11,6 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 
 import type {
@@ -33,11 +32,13 @@ import type { GSDEventStream } from './event-stream.js';
 import { loadConfig } from './config.js';
 import { runPhaseStepSession } from './session-runner.js';
 import { sanitizePrompt } from './prompt-sanitizer.js';
+import { resolveAgentsDir } from './query/helpers.js';
+import { resolveLegacyTemplatesDir } from './sdk-package-compatibility.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const GSD_TEMPLATES_DIR = join(homedir(), '.claude', 'get-shit-done', 'templates');
-const GSD_AGENTS_DIR = join(homedir(), '.claude', 'agents');
+const GSD_TEMPLATES_DIR = resolveLegacyTemplatesDir();
+const GSD_AGENTS_DIR = resolveAgentsDir();
 
 const RESEARCH_TYPES = ['STACK', 'FEATURES', 'ARCHITECTURE', 'PITFALLS'] as const;
 type ResearchType = (typeof RESEARCH_TYPES)[number];
@@ -398,7 +399,7 @@ export class InitRunner {
       '',
       'Write the file to .planning/PROJECT.md. Follow the template structure but fill in with real content derived from the user input.',
       'Be specific and opinionated — make decisions, don\'t list options.',
-    ].join('\n'));
+    ].join('\n'), this.projectDir);
   }
 
   /**
@@ -446,7 +447,7 @@ export class InitRunner {
       '',
       `Write .planning/research/${researchType}.md following the template structure.`,
       'Be comprehensive but opinionated. "Use X because Y" not "Options are X, Y, Z."',
-    ].join('\n'));
+    ].join('\n'), this.projectDir);
   }
 
   /**
@@ -491,7 +492,7 @@ export class InitRunner {
       '',
       'Write .planning/research/SUMMARY.md synthesizing all research findings.',
       'Also commit all research files: git add .planning/research/ && git commit.',
-    ].join('\n'));
+    ].join('\n'), this.projectDir);
   }
 
   /**
@@ -539,7 +540,7 @@ export class InitRunner {
       '',
       'Write .planning/REQUIREMENTS.md following the template structure.',
       'Every requirement must be testable and specific. No vague aspirations.',
-    ].join('\n'));
+    ].join('\n'), this.projectDir);
   }
 
   /**
@@ -590,7 +591,7 @@ export class InitRunner {
       'Create .planning/ROADMAP.md and .planning/STATE.md.',
       'ROADMAP.md: Transform requirements into phases. Every v1 requirement maps to exactly one phase.',
       'STATE.md: Initialize project state tracking.',
-    ].join('\n'));
+    ].join('\n'), this.projectDir);
   }
 
   // ─── Session execution ─────────────────────────────────────────────────────
@@ -624,42 +625,41 @@ export class InitRunner {
    * falls back to GSD-1 originals (~/.claude/get-shit-done/).
    */
   private async readGSDFile(relativePath: string): Promise<string> {
-    // Try SDK prompts dir first (headless versions)
-    const sdkPath = join(this.sdkPromptsDir, relativePath);
-    try {
-      return await readFile(sdkPath, 'utf-8');
-    } catch {
-      // Not in sdk/prompts/, fall through to GSD-1 originals
-    }
-
-    // Fall back to GSD-1 originals
+    // Try installed GSD first (complete, up-to-date versions)
     const fullPath = join(GSD_TEMPLATES_DIR, '..', relativePath);
     try {
       return await readFile(fullPath, 'utf-8');
     } catch {
-      // If the template doesn't exist, return a placeholder
+      // Not installed, fall through to SDK bundled copies
+    }
+
+    // Fall back to SDK bundled copies
+    const sdkPath = join(this.sdkPromptsDir, relativePath);
+    try {
+      return await readFile(sdkPath, 'utf-8');
+    } catch {
       return `(Template not found: ${relativePath})`;
     }
   }
 
   /**
    * Read an agent definition.
-   * Tries sdk/prompts/agents/{filename} first (headless versions), then
-   * falls back to GSD-1 originals (~/.claude/agents/).
+   * Tries installed agents first (complete, up-to-date versions), then
+   * falls back to SDK bundled copies.
    */
   private async readAgentFile(filename: string): Promise<string> {
-    // Try SDK prompts dir first (headless versions)
-    const sdkPath = join(this.sdkPromptsDir, 'agents', filename);
-    try {
-      return await readFile(sdkPath, 'utf-8');
-    } catch {
-      // Not in sdk/prompts/, fall through to GSD-1 originals
-    }
-
-    // Fall back to GSD-1 originals
+    // Try installed agents first (complete, up-to-date versions)
     const fullPath = join(GSD_AGENTS_DIR, filename);
     try {
       return await readFile(fullPath, 'utf-8');
+    } catch {
+      // Not installed, fall through to SDK bundled copies
+    }
+
+    // Fall back to SDK bundled copies
+    const sdkPath = join(this.sdkPromptsDir, 'agents', filename);
+    try {
+      return await readFile(sdkPath, 'utf-8');
     } catch {
       return `(Agent definition not found: ${filename})`;
     }

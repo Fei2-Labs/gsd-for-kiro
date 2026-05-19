@@ -8,6 +8,9 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const {
   MODEL_PROFILES,
   VALID_PROFILES,
@@ -15,20 +18,20 @@ const {
   getAgentToModelMapForProfile,
 } = require('../get-shit-done/bin/lib/model-profiles.cjs');
 
+function agentFilesOnDisk() {
+  return fs.readdirSync(path.join(__dirname, '..', 'agents'))
+    .filter((f) => /^gsd-.*\.md$/.test(f))
+    .map((f) => f.replace(/\.md$/, ''))
+    .sort();
+}
+
 // ─── MODEL_PROFILES data integrity ────────────────────────────────────────────
 
 describe('MODEL_PROFILES', () => {
-  test('contains all expected GSD agents', () => {
-    const expectedAgents = [
-      'gsd-planner', 'gsd-roadmapper', 'gsd-executor',
-      'gsd-phase-researcher', 'gsd-project-researcher', 'gsd-research-synthesizer',
-      'gsd-debugger', 'gsd-codebase-mapper', 'gsd-verifier',
-      'gsd-plan-checker', 'gsd-integration-checker', 'gsd-nyquist-auditor',
-      'gsd-ui-researcher', 'gsd-ui-checker', 'gsd-ui-auditor',
-    ];
-    for (const agent of expectedAgents) {
-      assert.ok(MODEL_PROFILES[agent], `Missing agent: ${agent}`);
-    }
+  test('contains every shipped gsd agent file on disk (#3229)', () => {
+    const expectedAgents = agentFilesOnDisk();
+    const actualAgents = Object.keys(MODEL_PROFILES).sort();
+    assert.deepStrictEqual(actualAgents, expectedAgents);
   });
 
   test('every agent has quality, balanced, budget, and adaptive profiles', () => {
@@ -65,13 +68,16 @@ describe('MODEL_PROFILES', () => {
 // ─── VALID_PROFILES ───────────────────────────────────────────────────────────
 
 describe('VALID_PROFILES', () => {
-  test('contains quality, balanced, and budget', () => {
-    assert.deepStrictEqual(VALID_PROFILES.sort(), ['adaptive', 'balanced', 'budget', 'quality']);
+  test('contains quality, balanced, budget, adaptive, and inherit', () => {
+    assert.deepStrictEqual(VALID_PROFILES.sort(), ['adaptive', 'balanced', 'budget', 'inherit', 'quality']);
   });
 
-  test('is derived from MODEL_PROFILES keys', () => {
+  test('includes all MODEL_PROFILES keys plus inherit', () => {
     const fromData = Object.keys(MODEL_PROFILES['gsd-planner']);
-    assert.deepStrictEqual(VALID_PROFILES.sort(), fromData.sort());
+    for (const profile of fromData) {
+      assert.ok(VALID_PROFILES.includes(profile), `VALID_PROFILES should include ${profile}`);
+    }
+    assert.ok(VALID_PROFILES.includes('inherit'), 'VALID_PROFILES should include inherit');
   });
 });
 

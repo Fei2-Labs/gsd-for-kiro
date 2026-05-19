@@ -1,0 +1,173 @@
+name: Dismiss Unauthorized PR Approvals
+
+on:
+  pull_request_review:
+    types: [submitted]
+  schedule:
+    # Fallback poll: pull_request_review runs whose triggering_actor is an
+    # outside collaborator are held in `action_required` until a maintainer
+    # approves them — so the event-driven path never fires for the very
+    # reviewers we want to dismiss. The schedule path runs as
+    # github-actions[bot] and bypasses that gate.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # Per-PR group for review events; single shared group for schedule/dispatch
+  # so polls serialize instead of stomping each other.
+  group: dismiss-unauthorized-pr-approvals-${{ github.event.pull_request.number || 'scheduled' }}
+  cancel-in-progress: false
+
+jobs:
+  dismiss-unauthorized-approval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Dismiss blocked/non-collaborator approvals
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const eventName = context.eventName;
+
+            // Any login here is always blocked, even if they are a collaborator.
+            const blockedReviewers = new Set(['ari4ka']);
+
+            // Any collaborator role is allowed unless explicitly blocked above.
+            const allowedRoles = new Set(['read', 'triage', 'write', 'maintain', 'admin']);
+
+            function norm(v) {
+              return (v || '').trim().toLowerCase();
+            }
+
+            const roleCache = new Map();
+            async function resolveRole(login) {
+              const key = norm(login);
+              if (roleCache.has(key)) return roleCache.get(key);
+              let role;
+              try {
+                const resp = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username: login,
+                });
+                role = norm(resp.data.role_name) || 'unknown';
+              } catch (error) {
+                if (error.status === 404) {
+                  role = 'none'; // confirmed non-collaborator
+                } else {
+                  core.warning(`Could not resolve reviewer role for ${login}: ${error.message}`);
+                  role = 'unknown';
+                }
+              }
+              roleCache.set(key, role);
+              return role;
+            }
+
+            function shouldDismissReviewer(login, roleName) {
+              const reviewer = norm(login);
+              const isBlocked = blockedReviewers.has(reviewer);
+              // 'unknown' means a transient API error — fail-safe: keep the approval.
+              // Only 'none' (true 404) is a confirmed non-collaborator.
+              const isKnownRole = roleName !== 'unknown';
+              const isAllowedRole = allowedRoles.has(roleName);
+
+              const reasons = [];
+              if (isBlocked) {
+                reasons.push(`reviewer is blocked (${reviewer})`);
+              }
+              if (isKnownRole && !isAllowedRole) {
+                reasons.push(`reviewer is not a collaborator or higher (detected role: ${roleName})`);
+              }
+
+              return {
+                dismiss: isBlocked || (isKnownRole && !isAllowedRole),
+                message: `Auto-dismissed approval: ${reasons.join('; ')}.`,
+              };
+            }
+
+            async function dismissReview(pull_number, review_id, reviewer, message) {
+              try {
+                await github.rest.pulls.dismissReview({
+                  owner,
+                  repo,
+                  pull_number,
+                  review_id,
+                  message,
+                });
+                core.info(`Dismissed approval from ${reviewer} on PR #${pull_number}. Reason: ${message}`);
+                return true;
+              } catch (error) {
+                if (error.status === 422) {
+                  core.warning(`Could not dismiss review ${review_id} on PR #${pull_number}: ${error.message}`);
+                  return false;
+                }
+                throw error;
+              }
+            }
+
+            async function processApproval({ pull_number, review_id, reviewer }) {
+              const roleName = await resolveRole(reviewer);
+              const verdict = shouldDismissReviewer(reviewer, roleName);
+              if (!verdict.dismiss) {
+                core.info(`Approval from ${reviewer} on PR #${pull_number} kept (role: ${roleName}).`);
+                return;
+              }
+              await dismissReview(pull_number, review_id, reviewer, verdict.message);
+            }
+
+            if (eventName === 'pull_request_review') {
+              const review = context.payload.review;
+              const pull = context.payload.pull_request;
+              if (norm(review.state) !== 'approved') {
+                core.info(`Skipping non-approval review (state=${review.state}).`);
+                return;
+              }
+              if (pull.state !== 'open') {
+                core.info(`Skipping review on non-open PR #${pull.number}.`);
+                return;
+              }
+              await processApproval({
+                pull_number: pull.number,
+                review_id: review.id,
+                reviewer: review.user.login,
+              });
+              return;
+            }
+
+            // schedule or workflow_dispatch — scan all open PRs.
+            core.info(`Scanning open PRs for unauthorized approvals (event=${eventName})...`);
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            core.info(`Found ${pulls.length} open PR(s).`);
+
+            let approvalsScanned = 0;
+            for (const pull of pulls) {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner,
+                repo,
+                pull_number: pull.number,
+                per_page: 100,
+              });
+              for (const review of reviews) {
+                // Already-dismissed reviews have state DISMISSED, so we won't reprocess them.
+                if (review.state !== 'APPROVED') continue;
+                approvalsScanned += 1;
+                await processApproval({
+                  pull_number: pull.number,
+                  review_id: review.id,
+                  reviewer: review.user.login,
+                });
+              }
+            }
+            core.info(`Scan complete: ${approvalsScanned} approval(s) evaluated across ${pulls.length} open PR(s).`);

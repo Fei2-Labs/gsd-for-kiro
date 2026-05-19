@@ -1,14 +1,15 @@
 ---
 name: gsd:code-review
 description: Review source files changed during a phase for bugs, security issues, and code quality problems
-argument-hint: "<phase-number> [--depth=quick|standard|deep] [--files file1,file2,...]"
+argument-hint: "<phase-number> [--depth=quick|standard|deep] [--files file1,file2,...] [--fix [--all] [--auto]]"
 allowed-tools:
   - Read
   - Bash
   - Glob
   - Grep
   - Write
-  - Task
+  - Agent
+requires: [config, import, phase, quick, review]
 ---
 <objective>
 Review source files changed during a phase for bugs, security vulnerabilities, and code quality problems.
@@ -22,6 +23,9 @@ Arguments:
   - standard: Per-file analysis with language-specific checks (~5-15 min, default)
   - deep: Cross-file analysis including import graphs and call chains (~15-30 min)
 - `--files file1,file2,...` (optional) — explicit comma-separated file list, skips SUMMARY/git scoping (highest precedence for scoping)
+- `--fix` (optional) — after review completes (or if REVIEW.md already exists), auto-apply fixes found. Spawns gsd-code-fixer agent. Accepts sub-flags:
+  - `--all` — include Info findings in fix scope (default: Critical + Warning only)
+  - `--auto` — enable fix + re-review iteration loop, capped at 3 iterations
 
 Output: {padded_phase}-REVIEW.md in phase directory + inline summary of findings
 </objective>
@@ -37,13 +41,13 @@ Optional flags parsed from $ARGUMENTS:
 - `--depth=VALUE` — Depth override (quick|standard|deep). If provided, overrides workflow.code_review_depth config.
 - `--files=file1,file2,...` — Explicit file list override. Has highest precedence for file scoping per D-08. When provided, workflow skips SUMMARY.md extraction and git diff fallback entirely.
 
-Context files (CLAUDE.md, SUMMARY.md, phase state) are resolved inside the workflow via `gsd-tools init phase-op` and delegated to agent via `<files_to_read>` blocks.
+Context files (CLAUDE.md, SUMMARY.md, phase state) are resolved inside the workflow via `gsd-sdk query init.phase-op` and delegated to agent via `<files_to_read>` blocks.
 </context>
 
 <process>
 This command is a thin dispatch layer. It parses arguments and delegates to the workflow.
 
-Execute the code-review workflow from @~/.claude/get-shit-done/workflows/code-review.md end-to-end.
+Execute end-to-end.
 
 The workflow (not this command) enforces these gates:
 - Phase validation (before config gate)

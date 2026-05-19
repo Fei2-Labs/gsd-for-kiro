@@ -1,3 +1,7 @@
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * GSD Tools Tests - Roadmap
  */
@@ -702,6 +706,31 @@ describe('roadmap update-plan-progress command', () => {
     assert.ok(roadmapContent.includes('1/2'), 'roadmap should contain updated plan count');
   });
 
+  test('counts plans and summaries from plans/ subdirectory layout (#3053)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+### Phase 1: Test
+**Goal:** Test goal
+`
+    );
+
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-test', 'plans');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, 'PLAN-01.md'), '# Plan 1');
+    fs.writeFileSync(path.join(p1, 'PLAN-02.md'), '# Plan 2');
+    fs.writeFileSync(path.join(p1, 'SUMMARY-01.md'), '# Summary 1');
+
+    const result = runGsdTools('roadmap analyze', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phases[0].plan_count, 2);
+    assert.strictEqual(output.phases[0].summary_count, 1);
+    assert.strictEqual(output.phases[0].disk_status, 'partial');
+  });
+
   test('updates progress and checks checkbox on completion', () => {
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'ROADMAP.md'),
@@ -740,6 +769,41 @@ describe('roadmap update-plan-progress command', () => {
     assert.ok(roadmapContent.includes('[x]'), 'checkbox should be checked');
     assert.ok(roadmapContent.includes('completed'), 'should contain completion date text');
     assert.ok(roadmapContent.includes('1/1'), 'roadmap should contain updated plan count');
+  });
+
+  test('updates unpadded ROADMAP phase entries when called with padded phase argument', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] **Phase 3: Build** - description
+
+### Phase 3: Build
+**Goal:** Test goal
+**Plans:** 0 plans
+- [ ] 03-01-PLAN.md
+
+## Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 3. Build | 0/1 | Planned |  |
+`
+    );
+
+    const p3 = path.join(tmpDir, '.planning', 'phases', '03-build');
+    fs.mkdirSync(p3, { recursive: true });
+    fs.writeFileSync(path.join(p3, '03-01-PLAN.md'), '# Plan 1');
+    fs.writeFileSync(path.join(p3, '03-01-SUMMARY.md'), '# Summary 1');
+
+    const result = runGsdTools('roadmap update-plan-progress 03', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const roadmapContent = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.match(roadmapContent, /- \[x\] \*\*Phase 3: Build\*\* - description \(completed \d{4}-\d{2}-\d{2}\)/);
+    assert.ok(roadmapContent.includes('**Plans:** 1/1 plans complete'), 'phase detail plan count should be updated');
+    assert.match(roadmapContent, /\| 3\. Build \| 1\/1 \| Complete\s+\| \d{4}-\d{2}-\d{2} \|/);
+    assert.ok(roadmapContent.includes('- [x] 03-01-PLAN.md'), 'completed plan checkbox should still be marked');
   });
 
   test('missing ROADMAP.md returns updated false', () => {
@@ -829,4 +893,3 @@ describe('roadmap update-plan-progress command', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // phase add command
 // ─────────────────────────────────────────────────────────────────────────────
-

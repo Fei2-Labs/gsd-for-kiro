@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import {
   splitInlineArray,
   extractFrontmatter,
+  extractFrontmatterLeading,
   stripFrontmatter,
   frontmatterGet,
   parseMustHavesBlock,
@@ -65,10 +66,55 @@ describe('extractFrontmatter', () => {
     expect(result).toEqual({ items: ['one', 'two'] });
   });
 
-  it('uses the LAST block when multiple stacked blocks exist', () => {
-    const content = '---\nold: data\n---\n---\nnew: data\n---\nbody';
+  it('returns the LEADING block when body contains markdown horizontal rules', () => {
+    // Regression: LAST-block semantics picked up body separators as frontmatter (#3240)
+    const content = [
+      '---',
+      'wave: 3',
+      'autonomous: false',
+      'phase: 05-hardening',
+      '---',
+      '',
+      '## Section One',
+      '',
+      '---',
+      '',
+      '## Section Two',
+      '',
+      '---',
+      '',
+      'body text',
+    ].join('\n');
     const result = extractFrontmatter(content);
-    expect(result).toEqual({ new: 'data' });
+    expect(result.wave).toBe('3');
+    expect(result.autonomous).toBe('false');
+    expect(result.phase).toBe('05-hardening');
+  });
+
+  it('returns the LEADING block when body contains embedded YAML in fenced code block', () => {
+    // Regression: LAST-block semantics matched YAML inside ```yaml fences (#3240)
+    const content = [
+      '---',
+      'wave: 2',
+      'autonomous: true',
+      'phase: 04-polish',
+      '---',
+      '',
+      '## Example',
+      '',
+      '```yaml',
+      '---',
+      'name: example',
+      'value: 99',
+      '---',
+      '```',
+      '',
+      'More body text.',
+    ].join('\n');
+    const result = extractFrontmatter(content);
+    expect(result.wave).toBe('2');
+    expect(result.autonomous).toBe('true');
+    expect(result.phase).toBe('04-polish');
   });
 
   it('handles empty-object-to-array conversion', () => {
@@ -92,6 +138,20 @@ describe('extractFrontmatter', () => {
     const content = '---\r\nkey: value\r\n---\r\nbody';
     const result = extractFrontmatter(content);
     expect(result).toEqual({ key: 'value' });
+  });
+});
+
+// ─── extractFrontmatterLeading ─────────────────────────────────────────────
+
+describe('extractFrontmatterLeading', () => {
+  it('parses only the first leading block (gsd-tools.cjs / frontmatter.cjs parity)', () => {
+    const content = '---\nfirst: 1\n---\n---\nsecond: 2\n---\nbody';
+    expect(extractFrontmatterLeading(content)).toEqual({ first: '1' });
+  });
+
+  it('matches extractFrontmatter when a single block starts the file', () => {
+    const content = '---\na: b\n---\n';
+    expect(extractFrontmatterLeading(content)).toEqual(extractFrontmatter(content));
   });
 });
 
